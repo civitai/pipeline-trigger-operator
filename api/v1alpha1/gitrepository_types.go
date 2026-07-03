@@ -66,25 +66,65 @@ func (currentGitRepository *GitRepository) Equals(newGitRepository GitRepository
 	}
 }
 
+// artifactField safely reads .status.artifact[key] from a Flux GitRepository as
+// a string. It returns "" when the GitRepository is not Ready yet — i.e. when
+// status or artifact is absent (a new semver source with no matching tag, or a
+// source still being reconciled). Upstream v0.5.0 does unchecked type
+// assertions here (Object["status"].(map)["artifact"].(map)[key]), which panic
+// with "interface conversion: nil, not map[string]interface{}" the moment such
+// a not-ready GitRepository is reconciled — and because a reconcile panic is
+// unrecovered, it crashes the whole manager and CrashLoopBackOffs the operator,
+// blocking every PipelineTrigger. This nil-safe accessor is the civitai patch.
+func artifactField(fluxGitRepository unstructured.Unstructured, key string) string {
+	status, ok := fluxGitRepository.Object["status"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	artifact, ok := status["artifact"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	value, ok := artifact[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", value)
+}
+
 func getGitRepositoryName(fluxGitRepository unstructured.Unstructured) string {
-	repositoryPath := fluxGitRepository.Object["status"].(map[string]interface{})["artifact"].(map[string]interface{})["path"]
-	repositoryPathStr := fmt.Sprintf("%v", repositoryPath)
-	repositoryName := strings.Split(repositoryPathStr, repositoryNameDelimeter)[gitRepositoryNamePosition]
-	return repositoryName
+	repositoryPathStr := artifactField(fluxGitRepository, "path")
+	if repositoryPathStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryPathStr, repositoryNameDelimeter)
+	if gitRepositoryNamePosition >= len(parts) {
+		return ""
+	}
+	return parts[gitRepositoryNamePosition]
 }
 
 func getBranchName(fluxGitRepository unstructured.Unstructured) string {
-	repositoryRevision := fluxGitRepository.Object["status"].(map[string]interface{})["artifact"].(map[string]interface{})["revision"]
-	repositoryRevisionStr := fmt.Sprintf("%v", repositoryRevision)
-	branchName := strings.Split(repositoryRevisionStr, revisionDelimiter)[branchNamePosition]
-	return branchName
+	repositoryRevisionStr := artifactField(fluxGitRepository, "revision")
+	if repositoryRevisionStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryRevisionStr, revisionDelimiter)
+	if branchNamePosition >= len(parts) {
+		return ""
+	}
+	return parts[branchNamePosition]
 }
 
 func getCommitId(fluxGitRepository unstructured.Unstructured) string {
-	repositoryCommitId := fluxGitRepository.Object["status"].(map[string]interface{})["artifact"].(map[string]interface{})["revision"]
-	repositoryCommitIdStr := fmt.Sprintf("%v", repositoryCommitId)
-	commitId := strings.Split(repositoryCommitIdStr, commitIdDelimeter)[commitIdPosition]
-	return commitId
+	repositoryCommitIdStr := artifactField(fluxGitRepository, "revision")
+	if repositoryCommitIdStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryCommitIdStr, commitIdDelimeter)
+	if commitIdPosition >= len(parts) {
+		return ""
+	}
+	return parts[commitIdPosition]
 }
 
 func (gitRepository *GitRepository) GetGitRepository(fluxGitRepository unstructured.Unstructured) {
