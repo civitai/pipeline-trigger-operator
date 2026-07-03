@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -72,28 +71,60 @@ func (imagePolicy *ImagePolicy) GetImagePolicy(fluxImagePolicy unstructured.Unst
 	imagePolicy.ImageVersion = getImageVersion(fluxImagePolicy)
 }
 
+// latestImage safely reads .status.latestImage from a Flux ImagePolicy as a
+// string, returning "" when the policy is not Ready (no latestImage resolved
+// yet). Upstream v0.5.0 does unchecked assertions here — same class of crash as
+// the GitRepository getters. Currently LATENT (the cluster has zero
+// ImagePolicy-sourced PipelineTriggers) but nil-guarded for parity so an
+// ImagePolicy trigger can never reintroduce the operator-wide crashloop.
+func latestImage(fluxImagePolicy unstructured.Unstructured) string {
+	status, ok := fluxImagePolicy.Object["status"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	latest, ok := status["latestImage"].(string)
+	if !ok {
+		return ""
+	}
+	return latest
+}
+
 func getRepositoryName(fluxImagePolicy unstructured.Unstructured) string {
-	repositoryPath := fluxImagePolicy.Object["status"].(map[string]interface{})["latestImage"].(string)
-	repositoryPathStr := fmt.Sprintf("%v", repositoryPath)
-	pathSubdirSize := len(strings.Split(repositoryPathStr, imageNameDelimeter))
-	repositoryName := strings.Split(repositoryPathStr, imageNameDelimeter)[pathSubdirSize-2]
-	return repositoryName
+	repositoryPathStr := latestImage(fluxImagePolicy)
+	if repositoryPathStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryPathStr, imageNameDelimeter)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-2]
 }
 
 func getImageName(fluxImagePolicy unstructured.Unstructured) string {
-	repositoryPath := fluxImagePolicy.Object["status"].(map[string]interface{})["latestImage"].(string)
-	repositoryPathStr := fmt.Sprintf("%v", repositoryPath)
-	pathSubdirSize := len(strings.Split(repositoryPathStr, imageNameDelimeter))
-	imageNameWithVersion := strings.Split(repositoryPathStr, imageNameDelimeter)[pathSubdirSize-1]
-	imageName := strings.Split(imageNameWithVersion, imageVersionDelimeter)[imageNamePosition]
-	return imageName
+	repositoryPathStr := latestImage(fluxImagePolicy)
+	if repositoryPathStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryPathStr, imageNameDelimeter)
+	imageNameWithVersion := parts[len(parts)-1]
+	sub := strings.Split(imageNameWithVersion, imageVersionDelimeter)
+	if imageNamePosition >= len(sub) {
+		return ""
+	}
+	return sub[imageNamePosition]
 }
 
 func getImageVersion(fluxImagePolicy unstructured.Unstructured) string {
-	repositoryPath := fluxImagePolicy.Object["status"].(map[string]interface{})["latestImage"].(string)
-	repositoryPathStr := fmt.Sprintf("%v", repositoryPath)
-	imageVersion := strings.Split(repositoryPathStr, imageVersionDelimeter)[imageVersionPosition]
-	return imageVersion
+	repositoryPathStr := latestImage(fluxImagePolicy)
+	if repositoryPathStr == "" {
+		return ""
+	}
+	parts := strings.Split(repositoryPathStr, imageVersionDelimeter)
+	if imageVersionPosition >= len(parts) {
+		return ""
+	}
+	return parts[imageVersionPosition]
 }
 
 func (imagePolicy *ImagePolicy) AddOrReplaceCondition(c metav1.Condition) {
