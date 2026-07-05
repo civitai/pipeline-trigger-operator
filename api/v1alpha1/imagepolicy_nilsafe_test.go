@@ -11,8 +11,8 @@ import (
 // these calls IS the assertion.
 func TestImagePolicyGetters_NotReady_NoPanic(t *testing.T) {
 	cases := []unstructured.Unstructured{
-		{Object: map[string]interface{}{}},                                             // no status
-		{Object: map[string]interface{}{"status": map[string]interface{}{}}},           // status, no latestRef
+		{Object: map[string]interface{}{}},                                                                        // no status
+		{Object: map[string]interface{}{"status": map[string]interface{}{}}},                                      // status, no latestRef
 		{Object: map[string]interface{}{"status": map[string]interface{}{"latestRef": map[string]interface{}{}}}}, // latestRef, no name/tag
 	}
 	for i, u := range cases {
