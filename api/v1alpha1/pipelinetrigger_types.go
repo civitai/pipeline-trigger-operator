@@ -418,6 +418,11 @@ func createParam(inputParam Param, details string) Param {
 
 func trimQuotes(paramValue string) string {
 	trimedParam := paramValue
+	// Defense-in-depth: an empty EvalExpr result (a not-ready source) would
+	// index-panic on trimedParam[0]. Currently unreachable, but cheap to guard.
+	if trimedParam == "" {
+		return trimedParam
+	}
 	if trimedParam[0] == '"' {
 		trimedParam = trimedParam[1:]
 	}
