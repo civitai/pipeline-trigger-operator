@@ -206,6 +206,20 @@ func evaluatePipelineParamsForGitRepository(pipelineTrigger *pipelinev1alpha1.Pi
 		return false, err
 	}
 
+	// A not-Ready GitRepository (no artifact yet — e.g. a semver source with no
+	// matching tag, or a source mid-reconcile) leaves Details empty: getGitRepositoryName/
+	// getBranchName/getCommitId return "" (see gitrepository_types.go) and
+	// GenerateDetails yields "". Evaluating a "$.commitId"-style param against
+	// empty Details would fail (previously it PANICKED in ajson and crashlooped
+	// the whole operator). Firing a PipelineRun with unresolved params is also
+	// wrong. Defer until the source resolves an artifact: return an error so
+	// CreatePipelineRunResource records a ReconcileError condition and does NOT
+	// fire, instead of building a bad run. A later reconcile — once the source is
+	// Ready — sees a new event, resets the condition, and fires normally.
+	if pipelineTrigger.Status.GitRepository.Details == "" {
+		return false, errors.New("git repository source not ready: no artifact/revision resolved yet")
+	}
+
 	for _, param := range params {
 		if strings.Contains(param.Value, "$") {
 			_, err := json.Exists(pipelineTrigger.Status.GitRepository.Details, param.Value)
