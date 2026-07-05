@@ -191,6 +191,17 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if !running && !runninOnSecondCluster {
 
+		// Snapshot the status BEFORE we advance it to the new source revision.
+		// GetLatestEvent (below) records the new revision into the in-memory
+		// status, and CreatePipelineRunResource appends a condition. If actually
+		// starting the Tekton PipelineRun then fails (e.g. the Tekton admission
+		// webhook is transiently unavailable), we must NOT persist this advanced
+		// status — otherwise the next reconcile sees "recorded revision == current
+		// revision" and never retries, permanently stranding the build until an
+		// unrelated new revision arrives. We restore this snapshot on failure so
+		// the revision is still seen as new and the create is retried.
+		statusBeforeAdvance := pipelineTrigger.Status.DeepCopy()
+
 		// Get the Latest Source Event
 		_, err := sourceSubscriber.GetLatestEvent(ctx, &pipelineTrigger, r.Client, req, sourceGroup, sourceVersion)
 		if err != nil {
@@ -199,14 +210,34 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// Create the PipelineRun resources
 		prs := sourceSubscriber.CreatePipelineRunResource(&pipelineTrigger, r.Scheme)
 		// Start the PipelineRun resources
+		var startErr error
 		for pipelineRunCnt := 0; pipelineRunCnt < len(prs); pipelineRunCnt++ {
 			instanceName, _, errRun := pipelineTrigger.StartPipelineRun(prs[pipelineRunCnt], ctx, req, r.Client)
 			if errRun != nil {
+				// Creating the Tekton PipelineRun failed (e.g. the Tekton
+				// admission webhook is down / connection refused). Record the
+				// error but do NOT mark this run as started and do NOT emit the
+				// "Started the pipeline" success event. We fall through to the
+				// retry path below so controller-runtime requeues and re-attempts
+				// once the webhook recovers.
+				startErr = errRun
 				r.recorder.Event(&pipelineTrigger, core.EventTypeWarning, "Error", errRun.Error())
+				continue
 			}
 			sourceSubscriber.SetCurrentPipelineRunName(ctx, r.Client, prs[pipelineRunCnt], instanceName, &pipelineTrigger)
 			newVersionMsg := "Started the pipeline " + instanceName + " in namespace " + pipelineTrigger.Namespace
 			r.recorder.Event(&pipelineTrigger, core.EventTypeNormal, "Info", newVersionMsg)
+		}
+
+		if startErr != nil {
+			// Roll back the in-memory status advance so the new revision is NOT
+			// persisted as processed, then surface a retryable error condition
+			// and requeue with backoff (ManageError returns Requeue: true). The
+			// next reconcile re-detects the revision as new and re-attempts the
+			// PipelineRun creation. This keeps a transient PipelineRun-create
+			// failure retryable instead of silently stranding the build.
+			pipelineTrigger.Status = *statusBeforeAdvance
+			return sourceSubscriber.ManageError(ctx, &pipelineTrigger, req, r.Client, startErr)
 		}
 
 		patch.UnstructuredContent()["status"] = pipelineTrigger.Status
