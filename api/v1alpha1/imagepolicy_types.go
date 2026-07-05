@@ -71,26 +71,55 @@ func (imagePolicy *ImagePolicy) GetImagePolicy(fluxImagePolicy unstructured.Unst
 	imagePolicy.ImageVersion = getImageVersion(fluxImagePolicy)
 }
 
+// latestRefField safely reads .status.latestRef[key] from a Flux ImagePolicy as
+// a string, returning "" when the policy is not Ready (no latestRef resolved
+// yet). Upstream does unchecked assertions here
+// (Object["status"].(map)["latestRef"].(map)[key].(string)) — same class of
+// crash as the GitRepository getters: the moment a not-Ready ImagePolicy is
+// reconciled, the nil.(map) assertion panics, the unrecovered reconcile panic
+// crashes the manager, and the operator CrashLoopBackOffs cluster-wide.
+// Currently LATENT (the cluster has zero ImagePolicy-sourced PipelineTriggers)
+// but nil-guarded for parity so an ImagePolicy trigger can never reintroduce
+// the crashloop. This is the civitai patch.
+func latestRefField(fluxImagePolicy unstructured.Unstructured, key string) string {
+	status, ok := fluxImagePolicy.Object["status"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	latestRef, ok := status["latestRef"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	value, ok := latestRef[key].(string)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
 func getRepositoryName(fluxImagePolicy unstructured.Unstructured) string {
-	latestRef := fluxImagePolicy.Object["status"].(map[string]interface{})["latestRef"].(map[string]interface{})
-	imageName := latestRef["name"].(string)
-	pathSubdirSize := len(strings.Split(imageName, imageNameDelimeter))
-	repositoryName := strings.Split(imageName, imageNameDelimeter)[pathSubdirSize-2]
-	return repositoryName
+	imageName := latestRefField(fluxImagePolicy, "name")
+	if imageName == "" {
+		return ""
+	}
+	parts := strings.Split(imageName, imageNameDelimeter)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-2]
 }
 
 func getImageName(fluxImagePolicy unstructured.Unstructured) string {
-	latestRef := fluxImagePolicy.Object["status"].(map[string]interface{})["latestRef"].(map[string]interface{})
-	imageName := latestRef["name"].(string)
-	pathSubdirSize := len(strings.Split(imageName, imageNameDelimeter))
-	imageNameOnly := strings.Split(imageName, imageNameDelimeter)[pathSubdirSize-1]
-	return imageNameOnly
+	imageName := latestRefField(fluxImagePolicy, "name")
+	if imageName == "" {
+		return ""
+	}
+	parts := strings.Split(imageName, imageNameDelimeter)
+	return parts[len(parts)-1]
 }
 
 func getImageVersion(fluxImagePolicy unstructured.Unstructured) string {
-	latestRef := fluxImagePolicy.Object["status"].(map[string]interface{})["latestRef"].(map[string]interface{})
-	imageVersion := latestRef["tag"].(string)
-	return imageVersion
+	return latestRefField(fluxImagePolicy, "tag")
 }
 
 func (imagePolicy *ImagePolicy) AddOrReplaceCondition(c metav1.Condition) {
