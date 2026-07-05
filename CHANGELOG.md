@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated Flux CRDs to latest versions from Flux v2.7
 
 ### Fixed
+- **CRITICAL**: Made a failed Tekton `PipelineRun` create retryable. Previously, if creating the PipelineRun was rejected (e.g. the Tekton admission webhook was transiently down: `failed calling webhook ... connect: connection refused`), the operator still advanced the PipelineTrigger status to the new source revision and returned without requeueing — permanently stranding the build until an unrelated new revision arrived. The reconcile now rolls back the in-memory status advance, does not emit the "Started the pipeline" success event, records a retryable error condition, and requeues so the create is retried once the webhook recovers. (Regression test reproduces the incident with a failing `ValidatingWebhookConfiguration`.)
 - **CRITICAL**: Fixed panic when using Tekton resolver-based pipeline references (bundles, git, cluster)
 - Updated ImagePolicy field access to use new `latestRef` structure instead of deprecated `latestImage`
 - Updated Artifact type references to use `meta.Artifact` with required `digest` field

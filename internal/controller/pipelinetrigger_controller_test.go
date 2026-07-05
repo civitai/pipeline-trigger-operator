@@ -18,6 +18,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	imagereflectorv1 "github.com/fluxcd/image-reflector-controller/api/v1"
@@ -26,12 +27,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	tektondevv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
+	"k8s.io/utils/ptr"
 
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1364,6 +1367,240 @@ var _ = Describe("PipelineTrigger controller", func() {
 				return len(createdPipelineTrigger5.Status.Branches.Branches["feature-branch-test"].Conditions), err
 			}, time.Minute, time.Second).Should(Equal(3))
 
+		})
+	})
+
+	// Regression test for the 2026-07-05 incident: a transient Tekton admission
+	// webhook outage rejected PipelineRun creates, yet the operator advanced the
+	// PipelineTrigger status to the new revision and returned without requeueing,
+	// permanently stranding the build. The fix keeps a PipelineRun-create failure
+	// retryable: status is NOT advanced, no success event is emitted, and the
+	// reconcile requeues so it retries once the webhook recovers.
+	Context("PipelineTrigger retries when the Tekton admission webhook rejects the PipelineRun create", func() {
+		ctx := context.Background()
+
+		const (
+			webhookGitRepositoryName = "git-repo-webhook-retry"
+			webhookPipelineName      = "build-and-push-webhook-retry"
+			webhookTaskName          = "build-webhook-retry"
+			webhookTriggerName       = "pipeline-trigger-webhook-retry"
+			webhookConfigName        = "reject-tekton-pipelineruns-webhook-retry"
+		)
+
+		// drainEvents non-blockingly collects everything currently in a
+		// FakeRecorder's channel.
+		drainEvents := func(rec *record.FakeRecorder) []string {
+			var events []string
+			for {
+				select {
+				case e := <-rec.Events:
+					events = append(events, e)
+				default:
+					return events
+				}
+			}
+		}
+
+		// ownedPipelineRuns counts the PipelineRuns owned by the given trigger.
+		ownedPipelineRuns := func(triggerName string) int {
+			list := &tektondevv1.PipelineRunList{}
+			_ = k8sClient.List(ctx, list)
+			count := 0
+			for i := range list.Items {
+				for _, ref := range list.Items[i].GetOwnerReferences() {
+					if ref.Name == triggerName {
+						count++
+					}
+				}
+			}
+			return count
+		}
+
+		It("Should not advance status and should requeue so the build is retried", func() {
+			By("Creating a Task and Pipeline referenced by the PipelineRun")
+			webhookTask := &tektondevv1.Task{
+				ObjectMeta: v1.ObjectMeta{Name: webhookTaskName, Namespace: namespace},
+				Spec: tektondevv1.TaskSpec{
+					Params: []tektondevv1.ParamSpec{{Name: webhookTaskName}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, webhookTask)).Should(Succeed())
+
+			webhookPipeline := &tektondevv1.Pipeline{
+				ObjectMeta: v1.ObjectMeta{Name: webhookPipelineName, Namespace: namespace},
+				Spec: tektondevv1.PipelineSpec{
+					Tasks: []tektondevv1.PipelineTask{{
+						Name:    webhookTaskName,
+						TaskRef: &tektondevv1.TaskRef{Name: webhookTaskName},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, webhookPipeline)).Should(Succeed())
+
+			By("Creating a GitRepository with a Ready revision")
+			webhookGitRepository := &sourcev1.GitRepository{
+				ObjectMeta: v1.ObjectMeta{Name: webhookGitRepositoryName, Namespace: namespace},
+				Spec: sourcev1.GitRepositorySpec{
+					URL:      "http://github.com/org/repo.git",
+					Interval: v1.Duration{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, webhookGitRepository)).Should(Succeed())
+
+			createdWebhookGitRepository := &sourcev1.GitRepository{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: webhookGitRepositoryName, Namespace: namespace}, createdWebhookGitRepository)
+			}, time.Minute, time.Second).Should(Succeed())
+
+			createdWebhookGitRepository.Status = sourcev1.GitRepositoryStatus{
+				Artifact: &meta.Artifact{
+					Path:           "gitrepository/flux-system/flux-system/ae05cbcffffffffffffffffffffffffffffffff.tar.gz",
+					URL:            "http://source-controller.flux-system.svc.cluster.local./gitrepository/flux-system/flux-system/ae05cbc.tar.gz",
+					Revision:       "main@sha1:ae05cbcffffffffffffffffffffffffffffffff",
+					Digest:         "sha256:ae05cbcffffffffffffffffffffffffffffffff",
+					LastUpdateTime: v1.Now(),
+				},
+				Conditions: []v1.Condition{{
+					Type:               "Ready",
+					Status:             v1.ConditionTrue,
+					Reason:             v1.StatusSuccess,
+					Message:            "Success",
+					ObservedGeneration: 1,
+					LastTransitionTime: v1.Now(),
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, createdWebhookGitRepository)).Should(Succeed())
+
+			By("Creating a PipelineTrigger referencing the Pipeline and GitRepository")
+			webhookPipelineRun := &unstructured.Unstructured{}
+			webhookPipelineRun.SetAPIVersion("tekton.dev/v1beta1")
+			webhookPipelineRun.SetKind("PipelineRun")
+			webhookPipelineRun.SetNamespace(namespace)
+			webhookPipelineRun.Object["spec"] = map[string]interface{}{
+				"pipelineRef": map[string]interface{}{"name": webhookPipelineName},
+				"params": []interface{}{
+					map[string]interface{}{"name": "param1", "value": "value1"},
+					map[string]interface{}{"name": "param2", "value": "value2"},
+				},
+			}
+
+			webhookTrigger := &pipelinev1alpha1.PipelineTrigger{
+				TypeMeta:   v1.TypeMeta{Kind: "PipelineTrigger", APIVersion: "pipeline.jquad.rocks/v1alpha1"},
+				ObjectMeta: v1.ObjectMeta{Name: webhookTriggerName, Namespace: namespace},
+				Spec: pipelinev1alpha1.PipelineTriggerSpec{
+					Source: pipelinev1alpha1.Source{
+						APIVersion: "source.toolkit.fluxcd.io/v1",
+						Kind:       "GitRepository",
+						Name:       webhookGitRepositoryName,
+					},
+					PipelineRun: *webhookPipelineRun,
+				},
+			}
+			Expect(k8sClient.Create(ctx, webhookTrigger)).Should(Succeed())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: webhookTriggerName, Namespace: namespace}, &pipelinev1alpha1.PipelineTrigger{})
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("Installing a failing ValidatingWebhookConfiguration that rejects PipelineRun creates")
+			webhookConfig := &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: v1.ObjectMeta{Name: webhookConfigName},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+					Name: "reject-pipelineruns.pipeline-trigger-operator.test",
+					ClientConfig: admissionregistrationv1.WebhookClientConfig{
+						// Nothing listens here -> connection refused, mirroring
+						// the incident's "failed calling webhook ... connect:
+						// connection refused".
+						URL: ptr.To("https://127.0.0.1:1/reject"),
+					},
+					Rules: []admissionregistrationv1.RuleWithOperations{{
+						Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
+						Rule: admissionregistrationv1.Rule{
+							APIGroups:   []string{"tekton.dev"},
+							APIVersions: []string{"*"},
+							Resources:   []string{"pipelineruns"},
+							Scope:       ptr.To(admissionregistrationv1.AllScopes),
+						},
+					}},
+					FailurePolicy:           ptr.To(admissionregistrationv1.Fail),
+					SideEffects:             ptr.To(admissionregistrationv1.SideEffectClassNone),
+					AdmissionReviewVersions: []string{"v1"},
+					TimeoutSeconds:          ptr.To(int32(5)),
+				}},
+			}
+			Expect(k8sClient.Create(ctx, webhookConfig)).Should(Succeed())
+			// Guarantee removal even if the spec fails, so the broken webhook
+			// cannot leak into other specs that create PipelineRuns.
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, webhookConfig)
+			})
+
+			By("Waiting until the webhook is active (PipelineRun creates are rejected)")
+			Eventually(func() bool {
+				probe := webhookPipelineRun.DeepCopy()
+				probe.SetName("webhook-probe-active")
+				err := k8sClient.Create(ctx, probe)
+				if err == nil {
+					_ = k8sClient.Delete(ctx, probe)
+					return false
+				}
+				return strings.Contains(err.Error(), "failed calling webhook")
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Reconciling while the webhook is down")
+			fakeRec := record.NewFakeRecorder(100)
+			pipelineTriggerReconciler.recorder = fakeRec
+			result, reconcileErr := pipelineTriggerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: webhookTriggerName, Namespace: namespace},
+			})
+
+			By("Checking the reconcile requeues (is retryable) rather than silently succeeding")
+			Expect(result.Requeue || reconcileErr != nil).To(BeTrue(),
+				"reconcile must requeue or error when the PipelineRun create fails")
+
+			By("Checking no PipelineRun was created for the trigger")
+			Expect(ownedPipelineRuns(webhookTriggerName)).To(Equal(0))
+
+			By("Checking the status was NOT advanced (no LatestPipelineRun recorded)")
+			strandedCheck := &pipelinev1alpha1.PipelineTrigger{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: webhookTriggerName, Namespace: namespace}, strandedCheck)).Should(Succeed())
+			Expect(strandedCheck.Status.GitRepository.LatestPipelineRun).To(BeEmpty())
+
+			By("Checking no 'Started the pipeline' success event was emitted")
+			for _, e := range drainEvents(fakeRec) {
+				Expect(e).ShouldNot(ContainSubstring("Started the pipeline"))
+			}
+
+			By("Recovering the webhook (deleting the failing configuration)")
+			Expect(k8sClient.Delete(ctx, webhookConfig)).Should(Succeed())
+			Eventually(func() bool {
+				probe := webhookPipelineRun.DeepCopy()
+				probe.SetName("webhook-probe-recovered")
+				err := k8sClient.Create(ctx, probe)
+				if err == nil {
+					_ = k8sClient.Delete(ctx, probe)
+					return true
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Reconciling after recovery -> the SAME revision is retried and a PipelineRun is created")
+			Eventually(func() int {
+				_, _ = pipelineTriggerReconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: webhookTriggerName, Namespace: namespace},
+				})
+				return ownedPipelineRuns(webhookTriggerName)
+			}, time.Minute, time.Second).Should(Equal(1))
+
+			By("Cleaning up the created PipelineRun")
+			list := &tektondevv1.PipelineRunList{}
+			Expect(k8sClient.List(ctx, list)).Should(Succeed())
+			for i := range list.Items {
+				for _, ref := range list.Items[i].GetOwnerReferences() {
+					if ref.Name == webhookTriggerName {
+						_ = k8sClient.Delete(ctx, &list.Items[i])
+					}
+				}
+			}
 		})
 	})
 
