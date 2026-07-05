@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	imagereflectorv1 "github.com/fluxcd/image-reflector-controller/api/v1"
+	imagereflectorv1beta2 "github.com/fluxcd/image-reflector-controller/api/v1beta2"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	pullrequestv1alpha1 "github.com/jquad-group/pullrequest-operator/api/v1alpha1"
 	tektondevv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
@@ -52,7 +52,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(imagereflectorv1.AddToScheme(scheme))
+	utilruntime.Must(imagereflectorv1beta2.AddToScheme(scheme))
 	utilruntime.Must(tektondevv1.AddToScheme(scheme))
 	utilruntime.Must(sourcev1.AddToScheme(scheme))
 	utilruntime.Must(pipelinev1alpha1.AddToScheme(scheme))

@@ -21,7 +21,7 @@ import (
 	"errors"
 	"strings"
 
-	imagereflectorv1 "github.com/fluxcd/image-reflector-controller/api/v1"
+	imagereflectorv1beta2 "github.com/fluxcd/image-reflector-controller/api/v1beta2"
 
 	"github.com/go-logr/logr"
 
@@ -368,7 +368,7 @@ func (r *PipelineTriggerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&pipelinev1alpha1.PipelineTrigger{},
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
-			&imagereflectorv1.ImagePolicy{},
+			&imagereflectorv1beta2.ImagePolicy{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSource),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
