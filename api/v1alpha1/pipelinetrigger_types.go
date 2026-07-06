@@ -155,8 +155,13 @@ func init() {
 
 func (pipelineTrigger *PipelineTrigger) createParams(details string) []Param {
 
-	// Extract "params" field as a generic JSON object
-	paramsJSON, _ := encodedJson.Marshal(pipelineTrigger.Spec.PipelineRun.Object["spec"].(map[string]interface{})["params"])
+	// Extract "params" field as a generic JSON object. Use a comma-ok assertion:
+	// if the template has no (or a wrong-typed) spec, a bare single-value
+	// assertion would PANIC here — before the builders' nil-map guards are even
+	// reached — and crashloop the manager. A nil specMap indexes to a nil params,
+	// which marshals to "null" and unmarshals to an empty param slice.
+	specMap, _ := pipelineTrigger.Spec.PipelineRun.Object["spec"].(map[string]interface{})
+	paramsJSON, _ := encodedJson.Marshal(specMap["params"])
 
 	// Create a slice of Param structs
 	var params []Param
@@ -200,7 +205,12 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(curre
 	}
 	spec, specFound := pr.Object["spec"].(map[string]interface{})
 	if !specFound {
-		// Handle the case where "name" is not found or not of the expected type
+		// The template had no (or a wrong-typed) spec — initialize a fresh one on
+		// the copy so the params assignment below never panics on a nil map. A
+		// params-only spec is rejected by the Tekton API server as a normal
+		// per-run create failure, rather than crashlooping the whole manager.
+		spec = map[string]interface{}{}
+		pr.Object["spec"] = spec
 	}
 	spec["params"] = unstructuredParams
 
@@ -270,7 +280,12 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		}
 		spec, specFound := pr.Object["spec"].(map[string]interface{})
 		if !specFound {
-			// Handle the case where "name" is not found or not of the expected type
+			// The template had no (or a wrong-typed) spec — initialize a fresh one
+			// on the copy so the params assignment below never panics on a nil
+			// map. A params-only spec is rejected by the Tekton API server as a
+			// normal per-run create failure, rather than crashlooping the manager.
+			spec = map[string]interface{}{}
+			pr.Object["spec"] = spec
 		}
 		spec["params"] = unstructuredParams
 
@@ -327,7 +342,12 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 
 		spec, specFound := pr.Object["spec"].(map[string]interface{})
 		if !specFound {
-			// Handle the case where "name" is not found or not of the expected type
+			// The template had no (or a wrong-typed) spec — initialize a fresh one
+			// on the copy so the params assignment below never panics on a nil
+			// map. A params-only spec is rejected by the Tekton API server as a
+			// normal per-run create failure, rather than crashlooping the manager.
+			spec = map[string]interface{}{}
+			pr.Object["spec"] = spec
 		}
 		spec["params"] = unstructuredParams
 		pipelineRunLabels = pipelineTrigger.Status.ImagePolicy.GenerateImagePolicyLabelsAsHash()
