@@ -123,6 +123,55 @@ func TestCreatePipelineRunResource_ReturnsIndependentCopy(t *testing.T) {
 	}
 }
 
+// TestCreatePipelineRunResource_MergesExistingTemplateLabels covers the
+// additive-merge label branch: when the Spec.PipelineRun template ALREADY carries
+// metadata.labels, the builder must merge the source-generated labels INTO a copy —
+// preserving the template's own labels on the run while leaving the shared
+// template's label map pristine (the DeepCopy must not let the merge bleed back).
+func TestCreatePipelineRunResource_MergesExistingTemplateLabels(t *testing.T) {
+	var tpl unstructured.Unstructured
+	tpl.SetAPIVersion("tekton.dev/v1")
+	tpl.SetKind("PipelineRun")
+	tpl.SetLabels(map[string]string{"team": "platform"})
+	tpl.Object["spec"] = map[string]interface{}{
+		"pipelineRef": map[string]interface{}{"name": "build-and-push"},
+		"params":      []interface{}{},
+	}
+
+	pt := &PipelineTrigger{
+		Spec: PipelineTriggerSpec{
+			Source:      Source{Kind: "GitRepository", Name: "repo"},
+			PipelineRun: tpl,
+		},
+		Status: PipelineTriggerStatus{
+			GitRepository: GitRepository{BranchName: "main", CommitId: "abc123", Details: `{"id":1}`},
+		},
+	}
+
+	run := pt.CreatePipelineRunResource()
+
+	// The run keeps the template's own label AND gains the source labels.
+	runLabels, _, _ := unstructured.NestedStringMap(run.Object, "metadata", "labels")
+	if runLabels["team"] != "platform" {
+		t.Errorf("run dropped the template's own label: got labels %v", runLabels)
+	}
+	srcLabels := pt.Status.GitRepository.GenerateGitRepositoryLabelsAsHash()
+	for k, v := range srcLabels {
+		if runLabels[k] != v {
+			t.Errorf("run missing merged source label %q=%q: got %v", k, v, runLabels)
+		}
+	}
+	if len(runLabels) <= len(srcLabels) {
+		t.Errorf("expected template label merged on top of %d source labels, got only %v", len(srcLabels), runLabels)
+	}
+
+	// The shared template's label map must be untouched (no source labels bled in).
+	tplLabels, _, _ := unstructured.NestedStringMap(pt.Spec.PipelineRun.Object, "metadata", "labels")
+	if len(tplLabels) != 1 || tplLabels["team"] != "platform" {
+		t.Errorf("Spec.PipelineRun template labels were mutated by the merge: got %v, want {team:platform}", tplLabels)
+	}
+}
+
 // paramValue returns the value of the named param in an unstructured PipelineRun's
 // spec.params, failing the test if the params array is malformed.
 func paramValue(t *testing.T, pr *unstructured.Unstructured, name string) string {
