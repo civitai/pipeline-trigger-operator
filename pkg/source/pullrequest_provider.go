@@ -174,6 +174,15 @@ func (pullrequestSubscriber PullrequestSubscriber) GetLatestEvent(ctx context.Co
 	}
 	var branches pipelinev1alpha1.Branches
 	branches.GetPrBranches(foundSource.Status.SourceBranches)
+	// An empty incoming branch list means the upstream PullRequest source has no
+	// data this reconcile (a failed/partial/not-yet-populated GitHub poll). Treat it
+	// as a no-op and NEVER wipe known-good branch state — otherwise the removal loop
+	// below deletes every branch (losing their build-eligibility Conditions) and the
+	// next good poll refills them condition-less, rebuilding every open PR even
+	// though no commits changed. (2026-07-06 rebuild-all incident.)
+	if len(branches.Branches) == 0 {
+		return false, nil
+	}
 	if len(pipelineTrigger.Status.Branches.Branches) > 0 {
 		// add all new branches to the status of the pipelinetrigger
 		for key, value := range branches.Branches {
