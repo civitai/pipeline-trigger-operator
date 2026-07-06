@@ -522,3 +522,67 @@ func TestCreatePipelineRunResource(t *testing.T) {
 		t.Errorf("CreatePipelineRunResource() for ImagePolicy source failed. Got %v, expected %v", resultPipelineRunImage, expectedPipelineRunImage)
 	}
 }
+
+// TestCreatePipelineRunResourceForBranchNoAliasing is the regression test for the
+// 2026-07-06 PipelineRun-create storm. The PullRequest source builds one run per
+// open branch in a single reconcile from the same Spec.PipelineRun template. The
+// builder used to mutate and return a POINTER to that shared template, so every
+// branch's run aliased one backing object; client.Create() writing the API
+// response (resourceVersion/uid/name) back into the first run then made the
+// second branch's create fail with "resourceVersion should not be set on objects
+// to be created", which the create-retry looped on forever. Each run must be an
+// independent deep copy of a pristine template.
+func TestCreatePipelineRunResourceForBranchNoAliasing(t *testing.T) {
+	var template unstructured.Unstructured
+	template.SetAPIVersion("tekton.dev/v1")
+	template.SetKind("PipelineRun")
+	template.Object["spec"] = map[string]interface{}{
+		"pipelineRef": map[string]interface{}{"name": "pr-check"},
+		"params":      []interface{}{},
+	}
+
+	pt := &PipelineTrigger{
+		Spec: PipelineTriggerSpec{
+			Source:      Source{Kind: "PullRequest", Name: "prs"},
+			PipelineRun: template,
+		},
+	}
+
+	branchA := Branch{Name: "feat/aaa", Commit: "aaaaaaaa", Details: "{\"id\":1}"}
+	branchB := Branch{Name: "feat/bbb", Commit: "bbbbbbbb", Details: "{\"id\":2}"}
+
+	runA := pt.CreatePipelineRunResourceForBranch(branchA, branchA.GenerateBranchLabelsAsHash())
+	runB := pt.CreatePipelineRunResourceForBranch(branchB, branchB.GenerateBranchLabelsAsHash())
+
+	// 1. Distinct objects — neither aliases the other nor the shared template.
+	if runA == runB {
+		t.Fatal("the two branch runs are the same *Unstructured pointer (aliased template)")
+	}
+	if runA == &pt.Spec.PipelineRun || runB == &pt.Spec.PipelineRun {
+		t.Fatal("a branch run aliases the shared Spec.PipelineRun template pointer")
+	}
+
+	// 2. Each run carries its OWN branch-derived generateName. (On the shared
+	//    object the "already has a generateName" guard skipped re-setting it, so
+	//    branch B inherited branch A's name.)
+	genA, _, _ := unstructured.NestedString(runA.Object, "metadata", "generateName")
+	genB, _, _ := unstructured.NestedString(runB.Object, "metadata", "generateName")
+	if genA != "feat-aaa-" {
+		t.Errorf("runA generateName = %q, want %q", genA, "feat-aaa-")
+	}
+	if genB != "feat-bbb-" {
+		t.Errorf("runB generateName = %q, want %q", genB, "feat-bbb-")
+	}
+
+	// 3. Simulate the poisoning: the API server stamps a resourceVersion into the
+	//    first run on Create(). It must NOT bleed onto the second run.
+	runA.SetResourceVersion("12345")
+	if rv := runB.GetResourceVersion(); rv != "" {
+		t.Errorf("runB inherited runA's resourceVersion %q — the runs are aliased (the storm bug)", rv)
+	}
+
+	// 4. The shared template is left pristine, so the next reconcile builds clean.
+	if _, found, _ := unstructured.NestedString(pt.Spec.PipelineRun.Object, "metadata", "generateName"); found {
+		t.Error("Spec.PipelineRun template was mutated (generateName leaked) — builder must not touch the shared template")
+	}
+}

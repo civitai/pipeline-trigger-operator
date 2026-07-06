@@ -192,6 +192,18 @@ func (pipelineTrigger *PipelineTrigger) createParams(details string) []Param {
 }
 
 func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(currentBranch Branch, labels map[string]string) *unstructured.Unstructured {
+	// Build on a DEEP COPY of the PipelineRun template — never mutate or return a
+	// pointer into the shared pipelineTrigger.Spec.PipelineRun. The PullRequest
+	// source builds one run per open branch in a single reconcile from this same
+	// template (see PullrequestSubscriber.CreatePipelineRunResource); if every
+	// branch shared one backing object, (a) all their runs would alias it and
+	// (b) client.Create() on the first run stamps resourceVersion/uid/name back
+	// into it, so the next branch's create is rejected with "resourceVersion
+	// should not be set on objects to be created". Combined with the create-retry
+	// path (which requeues on any create failure), that produced an unbounded
+	// PipelineRun-create storm that OOM-crashlooped the manager (2026-07-06).
+	pr := pipelineTrigger.Spec.PipelineRun.DeepCopy()
+
 	// Convert paramList to an unstructured array
 	var unstructuredParams []interface{}
 	paramList := pipelineTrigger.createParams(currentBranch.Details)
@@ -202,8 +214,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(curre
 		}
 		unstructuredParams = append(unstructuredParams, unstructuredParam)
 	}
-	//pipelineTrigger.Spec.PipelineRun.Object["params"] = unstructuredParams
-	spec, specFound := pipelineTrigger.Spec.PipelineRun.Object["spec"].(map[string]interface{})
+	spec, specFound := pr.Object["spec"].(map[string]interface{})
 	if !specFound {
 		// Handle the case where "name" is not found or not of the expected type
 	}
@@ -211,7 +222,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(curre
 
 	pipelineRunName := currentBranch.Rewrite() + "-"
 	// First, assert the types step by step
-	metadata, metadataFound := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})
+	metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 	if !metadataFound {
 		// Handle the case where "metadata" is not found or not of the expected type
 		metadata = make(map[string]interface{})
@@ -229,30 +240,38 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(curre
 		metadataGenerateName = pipelineRunName
 		// Update the "metadata" map within the object
 		metadata["generateName"] = metadataGenerateName
-		// Finally, update the object within pipelineTrigger
-		pipelineTrigger.Spec.PipelineRun.Object["metadata"] = metadata
+		// Finally, update the object within the copy
+		pr.Object["metadata"] = metadata
 	}
 
 	// if metadata.labels is nil, initialize the object
-	currentLabels, labelsExist := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"]
+	currentLabels, labelsExist := pr.Object["metadata"].(map[string]interface{})["labels"]
 	if labelsExist && currentLabels != nil {
 		// add the additional labels
 		for key, value := range labels {
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
+			pr.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
 		}
 	} else {
 		// The labels field does not exist or is nil
-		pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
-		pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(labels)
+		pr.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
+		pr.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(labels)
 	}
 
-	return &pipelineTrigger.Spec.PipelineRun
+	return pr
 }
 
 func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructured.Unstructured {
 
 	var pipelineRunLabels map[string]string
 	var pipelineRunName string
+
+	// Build on a DEEP COPY of the PipelineRun template — never mutate or return a
+	// pointer into the shared pipelineTrigger.Spec.PipelineRun (see the matching
+	// note on CreatePipelineRunResourceForBranch). client.Create() writes the
+	// server response back into the object it is given, so returning the shared
+	// template lets a completed create poison the next one with "resourceVersion
+	// should not be set on objects to be created".
+	pr := pipelineTrigger.Spec.PipelineRun.DeepCopy()
 
 	if pipelineTrigger.Spec.Source.Kind == "GitRepository" {
 		// Convert paramList to an unstructured array
@@ -265,8 +284,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 			}
 			unstructuredParams = append(unstructuredParams, unstructuredParam)
 		}
-		//pipelineTrigger.Spec.PipelineRun.Object["params"] = unstructuredParams
-		spec, specFound := pipelineTrigger.Spec.PipelineRun.Object["spec"].(map[string]interface{})
+		spec, specFound := pr.Object["spec"].(map[string]interface{})
 		if !specFound {
 			// Handle the case where "name" is not found or not of the expected type
 		}
@@ -275,7 +293,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		pipelineRunLabels = pipelineTrigger.Status.GitRepository.GenerateGitRepositoryLabelsAsHash()
 		pipelineRunName = pipelineTrigger.Status.GitRepository.Rewrite() + "-"
 		// First, assert the types step by step
-		metadata, metadataFound := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})
+		metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 		if !metadataFound {
 			// Handle the case where "metadata" is not found or not of the expected type
 			metadata = make(map[string]interface{})
@@ -291,25 +309,22 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		// Now, you can assign pipelineRunName to metadataGenerateName
 		if len(metadataName) == 0 && len(metadataGenerateName) == 0 {
 			metadataGenerateName = pipelineRunName
-			// initialize the generateName
-			//metadata["generateName"] = make(map[string]interface{})
-			// Update the "metadata" map within the object
+			// Update the "metadata" map within the copy
 			metadata["generateName"] = metadataGenerateName
-			// Finally, update the object within pipelineTrigger
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"] = metadata
+			pr.Object["metadata"] = metadata
 		}
 
 		// if metadata.labels is nil, initialize the object
-		labels, labelsExist := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"]
+		labels, labelsExist := pr.Object["metadata"].(map[string]interface{})["labels"]
 		if labelsExist && labels != nil {
 			// add the additional labels
 			for key, value := range pipelineRunLabels {
-				pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
+				pr.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
 			}
 		} else {
 			// The labels field does not exist or is nil
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(pipelineRunLabels)
+			pr.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
+			pr.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(pipelineRunLabels)
 		}
 
 	}
@@ -326,7 +341,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 			unstructuredParams = append(unstructuredParams, unstructuredParam)
 		}
 
-		spec, specFound := pipelineTrigger.Spec.PipelineRun.Object["spec"].(map[string]interface{})
+		spec, specFound := pr.Object["spec"].(map[string]interface{})
 		if !specFound {
 			// Handle the case where "name" is not found or not of the expected type
 		}
@@ -334,7 +349,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		pipelineRunLabels = pipelineTrigger.Status.ImagePolicy.GenerateImagePolicyLabelsAsHash()
 		pipelineRunName = pipelineTrigger.Status.ImagePolicy.Rewrite() + "-"
 
-		metadata, metadataFound := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})
+		metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 		if !metadataFound {
 			// Handle the case where "metadata" is not found or not of the expected type
 			metadata = make(map[string]interface{})
@@ -350,44 +365,27 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		// Now, you can assign pipelineRunName to metadataGenerateName
 		if len(metadataName) == 0 && len(metadataGenerateName) == 0 {
 			metadataGenerateName = pipelineRunName
-			// initialize the generateName
-			//metadata["generateName"] = make(map[string]interface{})
-			// Update the "metadata" map within the object
+			// Update the "metadata" map within the copy
 			metadata["generateName"] = metadataGenerateName
-			// Finally, update the object within pipelineTrigger
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"] = metadata
+			pr.Object["metadata"] = metadata
 		}
 
 		// if metadata.labels is nil, initialize the object
-		labels, labelsExist := pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"]
+		labels, labelsExist := pr.Object["metadata"].(map[string]interface{})["labels"]
 		if labelsExist && labels != nil {
 			// add the additional labels
 			for key, value := range pipelineRunLabels {
-				pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
+				pr.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})[key] = value
 			}
 		} else {
 			// The labels field does not exist or is nil
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
-			pipelineTrigger.Spec.PipelineRun.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(pipelineRunLabels)
+			pr.Object["metadata"].(map[string]interface{})["labels"] = make(map[string]interface{})
+			pr.Object["metadata"].(map[string]interface{})["labels"] = ConvertStringMapToInterfaceMap(pipelineRunLabels)
 		}
 
 	}
-	/*
-		pr := &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"apiVersion": "tekton.dev/v1",
-				"kind":       "PipelineRun",
-				"metadata": map[string]interface{}{
-					"generateName": pipelineRunName,
-					"namespace":    pipelineTrigger.Namespace,
-					"labels":       pipelineRunLabels,
-				},
-				"spec": pipelineTrigger.Spec.PipelineRun,
-			},
-		}
-	*/
 
-	return &pipelineTrigger.Spec.PipelineRun
+	return pr
 }
 
 func (pipelineTrigger *PipelineTrigger) StartPipelineRun(pr *unstructured.Unstructured, ctx context.Context, req ctrl.Request, tektonClient client.Client) (string, *unstructured.Unstructured, error) {
