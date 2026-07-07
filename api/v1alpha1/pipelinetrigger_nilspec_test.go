@@ -80,4 +80,25 @@ func TestCreatePipelineRun_NoTemplateSpec_DoesNotPanic(t *testing.T) {
 		run := pt.CreatePipelineRunResource()
 		assertParamsArray(t, run)
 	})
+
+	t.Run("single-source (ImagePolicy) path", func(t *testing.T) {
+		pt := &PipelineTrigger{
+			Spec: PipelineTriggerSpec{
+				Source:      Source{Kind: "ImagePolicy", Name: "policy"},
+				PipelineRun: newSpeclessTemplate(),
+			},
+			Status: PipelineTriggerStatus{
+				ImagePolicy: ImagePolicy{
+					RepositoryName: "ghcr.io",
+					ImageName:      "foo",
+					ImageVersion:   "1.2.3",
+					Details:        `{"imageVersion":"1.2.3"}`,
+				},
+			},
+		}
+
+		// Must not panic on the nil-map assignment (ImagePolicy specless branch).
+		run := pt.CreatePipelineRunResource()
+		assertParamsArray(t, run)
+	})
 }

@@ -50,3 +50,34 @@ func TestImagePolicyGetters_Ready_Parses(t *testing.T) {
 		t.Fatalf("getRepositoryName = %q, want \"civitai\"", got)
 	}
 }
+
+// A Ready-but-malformed latestRef.name (too few "/"-delimiter parts) or a missing
+// latestRef.tag must hit the position/len guards and return "" rather than panic
+// or return junk. Ported from the nilsafe coverage work (PR #11) and ADAPTED to
+// main's newer Flux API: nilsafe parsed a single .status.latestImage "repo/name:tag"
+// string; main reads .status.latestRef{name,tag} (v1beta2), where name carries the
+// repo/name path and tag carries the version. The guards under test are
+// getRepositoryName's `len(parts) < 2` check and getImageVersion's missing-tag path.
+func TestImagePolicyGetters_Malformed_ReturnEmpty(t *testing.T) {
+	// name has no "/" (len<2 guard) and no tag key (version empty).
+	bare := unstructured.Unstructured{Object: map[string]interface{}{
+		"status": map[string]interface{}{"latestRef": map[string]interface{}{"name": "foo"}},
+	}}
+	if got := getRepositoryName(bare); got != "" {
+		t.Errorf("getRepositoryName(name=%q) = %q, want \"\" (len<2 guard)", "foo", got)
+	}
+	if got := getImageVersion(bare); got != "" {
+		t.Errorf("getImageVersion(no tag) = %q, want \"\"", got)
+	}
+
+	// name has "/" (repo/name parse) but latestRef has no tag key -> version empty.
+	noVersion := unstructured.Unstructured{Object: map[string]interface{}{
+		"status": map[string]interface{}{"latestRef": map[string]interface{}{"name": "ghcr.io/foo"}},
+	}}
+	if got := getRepositoryName(noVersion); got != "ghcr.io" {
+		t.Errorf("getRepositoryName(name=%q) = %q, want %q", "ghcr.io/foo", got, "ghcr.io")
+	}
+	if got := getImageVersion(noVersion); got != "" {
+		t.Errorf("getImageVersion(no tag) = %q, want \"\"", got)
+	}
+}
