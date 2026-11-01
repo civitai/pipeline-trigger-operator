@@ -95,7 +95,8 @@ func TestCreatePipelineRunResource_RetriesCreateRejectedOnlyAfterSpecChange(t *t
 			ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "default", Generation: c.gen},
 			Spec:       pipelinev1alpha1.PipelineTriggerSpec{Source: pipelinev1alpha1.Source{Kind: "GitRepository"}, PipelineRun: rejectedTemplate()},
 			Status: pipelinev1alpha1.PipelineTriggerStatus{GitRepository: pipelinev1alpha1.GitRepository{
-				BranchName: "main", CommitId: "c1", Conditions: []metav1.Condition{c.cond},
+				// Non-empty Details: an empty one means "source not ready" and never fires.
+				BranchName: "main", CommitId: "c1", Details: `{"branchName":"main","commitId":"c1"}`, Conditions: []metav1.Condition{c.cond},
 			}},
 		}
 		if got := len(GitrepositorySubscriber{}.CreatePipelineRunResource(g, scheme)); got != c.wantRuns {
