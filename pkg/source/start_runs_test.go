@@ -119,6 +119,19 @@ func newCycleHarness(t *testing.T, branches []pullrequestv1alpha1.Branch, failCo
 	return h
 }
 
+// existing lists the runs the fake API server holds, as the controller's
+// ListTektonResources would hand them to StartPipelineRuns.
+func (h *cycleHarness) existing() unstructured.UnstructuredList {
+	h.t.Helper()
+	list := unstructured.UnstructuredList{}
+	list.SetAPIVersion("tekton.dev/v1")
+	list.SetKind("PipelineRunList")
+	if err := h.c.List(context.TODO(), &list); err != nil {
+		h.t.Fatal(err)
+	}
+	return list
+}
+
 // cycle mirrors the controller's create block for one reconcile; the trigger
 // object is reused, standing in for the status the controller persists.
 func (h *cycleHarness) cycle() StartResult {
@@ -130,7 +143,7 @@ func (h *cycleHarness) cycle() StartResult {
 		h.t.Fatal(err)
 	}
 	prs := sub.CreatePipelineRunResource(h.pt, h.scheme)
-	return StartPipelineRuns(ctx, h.c, sub, h.pt, prs, before, ctrl.Request{}, func(string, string, string) {})
+	return StartPipelineRuns(ctx, h.c, sub, h.pt, prs, h.existing(), before, ctrl.Request{}, func(string, string, string) {})
 }
 
 func TestStartPipelineRuns_PermanentErrorIsIsolatedAndNotRetried(t *testing.T) {
@@ -268,5 +281,39 @@ func TestSettleFailedRun_GitRepository(t *testing.T) {
 	}
 	if before.GitRepository.Conditions[0].Type != apis.ReconcileSuccess || len(before.GitRepository.Conditions) != 1 {
 		t.Errorf("transient: snapshot was mutated (aliasing): %+v", before.GitRepository.Conditions)
+	}
+}
+
+// With the branch status rolled back (or lost), an existing run owned by this
+// trigger for the same branch+commit must be re-adopted, not re-created; a run
+// owned by a DIFFERENT trigger must not suppress this trigger's run.
+func TestStartPipelineRuns_ExistingRunDeDup(t *testing.T) {
+	incident := "fix/bug-post-text-scan-raises-pg-posts-"
+	h := newCycleHarness(t, []pullrequestv1alpha1.Branch{
+		{Name: incident, Commit: commitA},
+		{Name: "feature/b", Commit: commitB},
+	}, "", nil, 0)
+	if r := h.cycle(); r.Started != 2 {
+		t.Fatalf("first cycle = %+v, want 2 started", r)
+	}
+	for i := 0; i < 3; i++ {
+		h.pt.Status = pipelinev1alpha1.PipelineTriggerStatus{} // rollback
+		if r := h.cycle(); r.Started != 0 || r.Existing != 2 {
+			t.Fatalf("after rollback %d: %+v, want 0 started / 2 existing", i, r)
+		}
+	}
+	if h.creates[commitA] != 1 || h.creates[commitB] != 1 {
+		t.Errorf("creates = %v, want 1 each", h.creates)
+	}
+	if h.pt.Status.Branches.Branches[incident].LatestPipelineRun == "" {
+		t.Error("re-adopted run not recorded as the branch's LatestPipelineRun")
+	}
+
+	// Same source, a different trigger (its runs are owned by another name):
+	// it must create its own runs.
+	h.pt.Name = "other-trigger"
+	h.pt.Status = pipelinev1alpha1.PipelineTriggerStatus{}
+	if r := h.cycle(); r.Started != 2 || r.Existing != 0 {
+		t.Errorf("other trigger: %+v, want its own 2 runs created", r)
 	}
 }

@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"strings"
 
 	pipelinev1alpha1 "github.com/jquad-group/pipeline-trigger-operator/api/v1alpha1"
 	apis "github.com/jquad-group/pipeline-trigger-operator/pkg/status"
@@ -39,9 +40,66 @@ func createFailedCondition(pt *pipelinev1alpha1.PipelineTrigger, err error) v1.C
 	}
 }
 
+const sourceLabelPrefix = "pipeline.jquad.rocks/"
+
+// findExistingRun returns the run in `existing` that this trigger already
+// created for the same source revision as `pr`, or nil. A match requires
+//   - the same controller owner (kind PipelineTrigger, same name, and same UID
+//     when both are known), so two triggers on one source never suppress each
+//     other's runs, and
+//   - identical values for every pipeline.jquad.rocks/* label on `pr` (branch
+//     name + commit for a PullRequest; branch + commit for a GitRepository;
+//     image + version for an ImagePolicy). These come from the same
+//     sanitising builders on both sides, so a sanitised run still matches.
+//
+// tekton.dev/pipeline is deliberately not required: Tekton's controller adds
+// it some time after the create, so requiring it would miss a run created
+// moments ago. The owner check is what scopes the match to this trigger (and
+// thereby to its pipeline).
+//
+// A new commit value — a push, or the pullrequest-operator folding a changed
+// label-set hash into Branch.Commit — changes pr.branch.commit and so never
+// matches an older run.
+func findExistingRun(pt *pipelinev1alpha1.PipelineTrigger, pr *unstructured.Unstructured, existing unstructured.UnstructuredList) *unstructured.Unstructured {
+	want := map[string]string{}
+	for k, v := range pr.GetLabels() {
+		if strings.HasPrefix(k, sourceLabelPrefix) {
+			want[k] = v
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	for i := range existing.Items {
+		item := &existing.Items[i]
+		owner := v1.GetControllerOf(item)
+		if owner == nil || owner.Kind != "PipelineTrigger" || owner.Name != pt.GetName() {
+			continue
+		}
+		if owner.UID != "" && pt.GetUID() != "" && owner.UID != pt.GetUID() {
+			continue
+		}
+		labels := item.GetLabels()
+		match := true
+		for k, v := range want {
+			if got, ok := labels[k]; !ok || got != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			return item
+		}
+	}
+	return nil
+}
+
 // StartResult summarises one StartPipelineRuns call.
 type StartResult struct {
 	Started int
+	// Existing counts runs NOT created because this trigger already owns a
+	// run for the same source revision (see findExistingRun).
+	Existing int
 	// Permanent counts runs whose create was rejected permanently; their slot
 	// carries an Error condition and is NOT retried for the same revision.
 	Permanent int
@@ -62,9 +120,20 @@ type StartResult struct {
 // The old behaviour rolled back the WHOLE status on any failure, so one
 // branch's permanent error replayed the creates of every other branch of the
 // same PullRequest on each requeue.
-func StartPipelineRuns(ctx context.Context, c client.Client, sub SourceSubscriber, pt *pipelinev1alpha1.PipelineTrigger, prs []*unstructured.Unstructured, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, req ctrl.Request, event func(eventtype, reason, message string)) StartResult {
+func StartPipelineRuns(ctx context.Context, c client.Client, sub SourceSubscriber, pt *pipelinev1alpha1.PipelineTrigger, prs []*unstructured.Unstructured, existing unstructured.UnstructuredList, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, req ctrl.Request, event func(eventtype, reason, message string)) StartResult {
 	var res StartResult
 	for _, pr := range prs {
+		if prior := findExistingRun(pt, pr, existing); prior != nil {
+			// This trigger already created a run for exactly this source
+			// revision (same pipeline.jquad.rocks/* labels): re-adopt it
+			// instead of creating a duplicate. Without this, the branch status
+			// was the only de-dup, and any rolled-back/lost status re-created
+			// the run.
+			res.Existing++
+			sub.SetCurrentPipelineRunName(ctx, c, prior, prior.GetName(), pt)
+			event(core.EventTypeNormal, "Info", "PipelineRun "+prior.GetName()+" already exists for this revision; not re-creating")
+			continue
+		}
 		instanceName, _, errRun := pt.StartPipelineRun(pr, ctx, req, c)
 		if errRun != nil {
 			event(core.EventTypeWarning, "Error", errRun.Error())

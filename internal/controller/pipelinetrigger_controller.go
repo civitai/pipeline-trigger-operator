@@ -244,7 +244,7 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// The old code restored the WHOLE status and requeued on any failure,
 		// so one branch's permanent rejection re-created the runs of every
 		// other branch of the same PullRequest on each requeue (2026-10-31).
-		startResult := sourceApi.StartPipelineRuns(ctx, r.Client, sourceSubscriber, &pipelineTrigger, prs, statusBeforeAdvance, req,
+		startResult := sourceApi.StartPipelineRuns(ctx, r.Client, sourceSubscriber, &pipelineTrigger, prs, pipelineRunList, statusBeforeAdvance, req,
 			func(eventtype, reason, message string) {
 				r.recorder.Event(&pipelineTrigger, eventtype, reason, message)
 			})
