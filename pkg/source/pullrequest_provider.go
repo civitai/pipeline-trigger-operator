@@ -232,6 +232,35 @@ func (pullrequestSubscriber PullrequestSubscriber) SetCurrentPipelineRunName(ctx
 	}
 }
 
+func (pullrequestSubscriber PullrequestSubscriber) SettleFailedRun(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, pipelineRun *unstructured.Unstructured, err error, permanent bool) {
+	for key := range pipelineTrigger.Status.Branches.Branches {
+		tempBranch := pipelineTrigger.Status.Branches.Branches[key]
+		// Same label derivation as the writer (CreatePipelineRunResourceForBranch)
+		// and SetCurrentPipelineRunName, so the failed run maps to its branch.
+		if !pullrequestSubscriber.HasIntersection(tempBranch.GenerateBranchLabelsAsHash(), pipelineRun.GetLabels()) {
+			continue
+		}
+		if permanent {
+			// Keep the new commit (so GetLatestEvent sees nothing new) and
+			// replace the Unknown "run pending" condition with the error. Clear
+			// LatestPipelineRun: it names a run for an OLDER commit, and
+			// SetCurrentPipelineRunStatus would otherwise copy that run's result
+			// onto this commit.
+			tempBranch.LatestPipelineRun = ""
+			tempBranch.Conditions = []v1.Condition{createFailedCondition(pipelineTrigger, err)}
+			pipelineTrigger.Status.Branches.Branches[key] = tempBranch
+			continue
+		}
+		// Transient: restore just this branch. If it was not tracked before, drop
+		// it, so the next reconcile re-adds it as new and retries.
+		if prev, ok := statusBefore.Branches.Branches[key]; ok {
+			pipelineTrigger.Status.Branches.Branches[key] = *prev.DeepCopy()
+		} else {
+			delete(pipelineTrigger.Status.Branches.Branches, key)
+		}
+	}
+}
+
 func (pullrequestSubscriber PullrequestSubscriber) CreatePipelineRunResource(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, r *runtime.Scheme) []*unstructured.Unstructured {
 	var prs []*unstructured.Unstructured
 	for key := range pipelineTrigger.Status.Branches.Branches {

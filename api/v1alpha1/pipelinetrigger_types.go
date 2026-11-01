@@ -230,7 +230,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResourceForBranch(curre
 	}
 	spec["params"] = unstructuredParams
 
-	pipelineRunName := currentBranch.Rewrite() + "-"
+	pipelineRunName := GenerateNamePrefix(currentBranch.Rewrite())
 	// First, assert the types step by step
 	metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 	if !metadataFound {
@@ -306,7 +306,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		spec["params"] = unstructuredParams
 
 		pipelineRunLabels = pipelineTrigger.Status.GitRepository.GenerateGitRepositoryLabelsAsHash()
-		pipelineRunName = pipelineTrigger.Status.GitRepository.Rewrite() + "-"
+		pipelineRunName = GenerateNamePrefix(pipelineTrigger.Status.GitRepository.Rewrite())
 		// First, assert the types step by step
 		metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 		if !metadataFound {
@@ -367,7 +367,7 @@ func (pipelineTrigger *PipelineTrigger) CreatePipelineRunResource() *unstructure
 		}
 		spec["params"] = unstructuredParams
 		pipelineRunLabels = pipelineTrigger.Status.ImagePolicy.GenerateImagePolicyLabelsAsHash()
-		pipelineRunName = pipelineTrigger.Status.ImagePolicy.Rewrite() + "-"
+		pipelineRunName = GenerateNamePrefix(pipelineTrigger.Status.ImagePolicy.Rewrite())
 
 		metadata, metadataFound := pr.Object["metadata"].(map[string]interface{})
 		if !metadataFound {

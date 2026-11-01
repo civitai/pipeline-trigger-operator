@@ -44,16 +44,19 @@ type GitRepository struct {
 func (currentGitRepository *GitRepository) GenerateGitRepositoryLabelsAsHash() map[string]string {
 	labels := make(map[string]string)
 
-	labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.name"] = currentGitRepository.BranchName
-	labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.commit"] = currentGitRepository.CommitId
+	// Derived from the Flux artifact revision; sanitised so a ref like
+	// "feature/x" cannot make every PipelineRun create fail validation.
+	labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.name"] = SanitizeLabelValue(currentGitRepository.BranchName)
+	labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.commit"] = SanitizeLabelValue(currentGitRepository.CommitId)
 
 	return labels
 }
 
 func (currentGitRepository *GitRepository) GenerateGitRepositoryLabelsAsString() string {
+	labels := currentGitRepository.GenerateGitRepositoryLabelsAsHash()
 	label :=
-		pipelineTriggerLabelKey + "/" + "git.repository.branch.name=" + currentGitRepository.BranchName + "," +
-			pipelineTriggerLabelKey + "/" + "git.repository.branch.commit=" + currentGitRepository.CommitId
+		pipelineTriggerLabelKey + "/" + "git.repository.branch.name=" + labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.name"] + "," +
+			pipelineTriggerLabelKey + "/" + "git.repository.branch.commit=" + labels[pipelineTriggerLabelKey+"/"+"git.repository.branch.commit"]
 
 	return label
 }

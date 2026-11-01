@@ -209,6 +209,29 @@ func evaluatePipelineParamsForImage(pipelineTrigger *pipelinev1alpha1.PipelineTr
 	return true, nil
 }
 
+func (imagepolicySubscriber ImagepolicySubscriber) SettleFailedRun(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, pipelineRun *unstructured.Unstructured, err error, permanent bool) {
+	// Single-slot source: the run was built for Status.ImagePolicy.
+	if permanent {
+		// Keep the advanced revision so it is not retried until a new one
+		// arrives; record why. LatestPipelineRun named an older revision's run.
+		pipelineTrigger.Status.ImagePolicy.LatestPipelineRun = ""
+		pipelineTrigger.Status.ImagePolicy.Conditions = []v1.Condition{createFailedCondition(pipelineTrigger, err)}
+		return
+	}
+	// Transient (2026-07-05 behaviour): roll the slot back so the revision is
+	// still seen as new, plus an Error condition so the failure is visible
+	// (exactly what the old whole-status restore + ManageError persisted).
+	pipelineTrigger.Status.ImagePolicy = *statusBefore.ImagePolicy.DeepCopy()
+	pipelineTrigger.Status.ImagePolicy.AddOrReplaceCondition(v1.Condition{
+		Type:               apis.ReconcileError,
+		LastTransitionTime: v1.Now(),
+		ObservedGeneration: pipelineTrigger.GetGeneration(),
+		Reason:             apis.ReconcileErrorReason,
+		Status:             v1.ConditionFalse,
+		Message:            err.Error(),
+	})
+}
+
 func (imagepolicySubscriber ImagepolicySubscriber) SetCurrentPipelineRunName(ctx context.Context, client client.Client, pipelineRun *unstructured.Unstructured, pipelineRunName string, pipelineTrigger *pipelinev1alpha1.PipelineTrigger) {
 	pipelineTrigger.Status.ImagePolicy.LatestPipelineRun = pipelineRunName
 }
