@@ -105,6 +105,10 @@ func newCycleHarness(t *testing.T, branches []pullrequestv1alpha1.Branch, failCo
 	tpl.SetAPIVersion("tekton.dev/v1")
 	tpl.SetKind("PipelineRun")
 	tpl.SetGenerateName("pr-check-")
+	// Real templates set the trigger's namespace; without it
+	// SetControllerReference refuses (namespaced owner on a cluster-scoped
+	// object) and the run carries no owner, which the de-dup relies on.
+	tpl.SetNamespace("default")
 	tpl.Object["spec"] = map[string]interface{}{
 		"pipelineRef": map[string]interface{}{"name": "pr-check"},
 		"params":      []interface{}{},
@@ -304,6 +308,15 @@ func TestStartPipelineRuns_ExistingRunDeDup(t *testing.T) {
 	}
 	if h.creates[commitA] != 1 || h.creates[commitB] != 1 {
 		t.Errorf("creates = %v, want 1 each", h.creates)
+	}
+	list := h.existing()
+	if len(list.Items) != 2 {
+		t.Fatalf("want 2 runs, got %d", len(list.Items))
+	}
+	for i := range list.Items {
+		if metav1.GetControllerOf(&list.Items[i]) == nil {
+			t.Errorf("run %s has no controller owner", list.Items[i].GetName())
+		}
 	}
 	if h.pt.Status.Branches.Branches[incident].LatestPipelineRun == "" {
 		t.Error("re-adopted run not recorded as the branch's LatestPipelineRun")
