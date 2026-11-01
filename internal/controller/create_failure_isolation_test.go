@@ -386,6 +386,106 @@ var _ = Describe("PipelineRun create failures are isolated per branch", func() {
 		Expect(ownedRuns("iso-dedup-trigger")).To(HaveLen(3))
 	})
 
+	// A permanent rejection caused by the trigger's own template must be
+	// retried once the spec is fixed (generation bump) — exactly once.
+	It("a CreateRejected branch is retried exactly once after the trigger spec changes", func() {
+		createPipeline("iso-gen-pipeline")
+		createPullRequestSource("iso-gen-pr", []pullrequestv1alpha1.Branch{
+			{Name: "feature/a", Commit: commitA},
+			{Name: "feature/bad", Commit: commitBad},
+		})
+		createTrigger("iso-gen-trigger", pipelinev1alpha1.Source{
+			APIVersion: "pipeline.jquad.rocks/v1alpha1", Kind: "PullRequest", Name: "iso-gen-pr",
+		}, template("iso-gen-pipeline"))
+
+		cc := newCountingClient(k8sClient)
+		cc.failCommit, cc.failErr, cc.failTimes = commitBad, permanentInvalid, 1
+		r := newReconciler(cc)
+		reconcileN(r, "iso-gen-trigger", 3)
+		Expect(cc.count(commitBad)).To(Equal(1))
+
+		By("editing the trigger spec (the 'template fix') bumps metadata.generation")
+		pt := getTrigger("iso-gen-trigger")
+		gen := pt.GetGeneration()
+		pt.Spec.PipelineRun.SetLabels(map[string]string{"tekton.dev/pipeline": "iso-gen-pipeline", "fixed": "true"})
+		Expect(k8sClient.Update(ctx, pt)).To(Succeed())
+		Expect(getTrigger("iso-gen-trigger").GetGeneration()).To(BeNumerically(">", gen))
+
+		reconcileN(r, "iso-gen-trigger", 3)
+		Expect(cc.count(commitBad)).To(Equal(2), "rejected branch retried exactly once after the spec change")
+		Expect(cc.count(commitA)).To(Equal(1), "healthy branch must not re-run on a spec edit")
+		Expect(ownedRuns("iso-gen-trigger")).To(HaveLen(2))
+	})
+
+	// The live status left by the incident: branches carrying the OLD code's
+	// generic Error condition. Seed that shape and check the new code neither
+	// re-fires them (also not on a spec edit) nor fails to build new commits.
+	It("handles the incident's leftover status shape: old Error conditions and an existing run", func() {
+		const commitOld = "0000000000000000000000000000000000000000"
+		createPipeline("iso-seed-pipeline")
+		createPullRequestSource("iso-seed-pr", []pullrequestv1alpha1.Branch{
+			{Name: "feature/old", Commit: commitA}, // source moved past the status commit
+			{Name: "feature/cur", Commit: commitB}, // source == status commit
+		})
+		createTrigger("iso-seed-trigger", pipelinev1alpha1.Source{
+			APIVersion: "pipeline.jquad.rocks/v1alpha1", Kind: "PullRequest", Name: "iso-seed-pr",
+		}, template("iso-seed-pipeline"))
+		pt := getTrigger("iso-seed-trigger")
+
+		oldErr := []v1.Condition{{
+			Type: opstatus.ReconcileError, Status: v1.ConditionFalse, Reason: opstatus.ReconcileErrorReason,
+			Message: "PipelineRun.tekton.dev is invalid: metadata.labels: Invalid value", ObservedGeneration: pt.GetGeneration(),
+			LastTransitionTime: v1.Now(),
+		}}
+		pt.Status = pipelinev1alpha1.PipelineTriggerStatus{Branches: pipelinev1alpha1.Branches{Branches: map[string]pipelinev1alpha1.Branch{
+			"feature/old": {Name: "feature/old", Commit: commitOld, Conditions: oldErr},
+			"feature/cur": {Name: "feature/cur", Commit: commitB, Conditions: oldErr},
+		}}}
+		Expect(k8sClient.Status().Update(ctx, pt)).To(Succeed())
+
+		By("a pre-existing run owned by the trigger for feature/cur@current")
+		ctrlTrue := true
+		existing := &tektondevv1.PipelineRun{
+			ObjectMeta: v1.ObjectMeta{
+				GenerateName: "pr-check-", Namespace: isoNamespace,
+				Labels: map[string]string{
+					"pipeline.jquad.rocks/pr.branch.name": "feature-cur",
+					labelCommitKey:                        commitB,
+					"tekton.dev/pipeline":                 "iso-seed-pipeline",
+				},
+				OwnerReferences: []v1.OwnerReference{{
+					APIVersion: "pipeline.jquad.rocks/v1alpha1", Kind: "PipelineTrigger",
+					Name: pt.GetName(), UID: pt.GetUID(), Controller: &ctrlTrue,
+				}},
+			},
+			Spec: tektondevv1.PipelineRunSpec{PipelineRef: &tektondevv1.PipelineRef{Name: "iso-seed-pipeline"}},
+		}
+		Expect(k8sClient.Create(ctx, existing)).To(Succeed())
+
+		cc := newCountingClient(k8sClient)
+		r := newReconciler(cc)
+		reconcileN(r, "iso-seed-trigger", 3)
+		Expect(cc.count(commitB)).To(Equal(0), "current-commit branch with an existing run must not be re-created")
+		Expect(cc.count(commitA)).To(Equal(1), "branch whose source moved builds exactly once")
+
+		By("a spec edit must not re-fire old-code Error conditions")
+		pt = getTrigger("iso-seed-trigger")
+		pt.Spec.PipelineRun.SetLabels(map[string]string{"tekton.dev/pipeline": "iso-seed-pipeline", "edited": "true"})
+		Expect(k8sClient.Update(ctx, pt)).To(Succeed())
+		reconcileN(r, "iso-seed-trigger", 2)
+		Expect(cc.count(commitB)).To(Equal(0))
+		Expect(cc.count(commitA)).To(Equal(1))
+
+		By("a new commit on the current-commit branch builds")
+		src := &pullrequestv1alpha1.PullRequest{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "iso-seed-pr", Namespace: isoNamespace}, src)).To(Succeed())
+		src.Status.SourceBranches.Branches[1].Commit = commitC
+		Expect(k8sClient.Status().Update(ctx, src)).To(Succeed())
+		reconcileN(r, "iso-seed-trigger", 2)
+		Expect(cc.count(commitC)).To(Equal(1))
+		Expect(ownedRuns("iso-seed-trigger")).To(HaveLen(3)) // seeded + old-branch build + new commit
+	})
+
 	It("a GitRepository on a ref with a '/' gets one run that CalculateCurrentState recognises as already running", func() {
 		createPipeline("iso-git-pipeline")
 		repo := &sourcev1.GitRepository{
