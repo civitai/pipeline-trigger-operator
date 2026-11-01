@@ -334,6 +334,58 @@ var _ = Describe("PipelineRun create failures are isolated per branch", func() {
 		Expect(pt.Status.Branches.Branches["feature/ok"].LatestPipelineRun).To(Equal(runByCommit[commitC]))
 	})
 
+	// The PullRequest CalculateCurrentState never reported a branch as already
+	// built (it always returned false), so status was the ONLY de-dup: any path
+	// that loses or rolls back a branch's status re-creates its run. An
+	// existing run owned by this trigger with the same branch/commit labels must
+	// prevent a second create.
+	It("a branch whose status was rolled back is not re-created when its run already exists", func() {
+		createPipeline("iso-dedup-pipeline")
+		createPullRequestSource("iso-dedup-pr", []pullrequestv1alpha1.Branch{
+			{Name: "fix/dedup-trailing-", Commit: commitA},
+			{Name: "feature/b", Commit: commitB},
+		})
+		createTrigger("iso-dedup-trigger", pipelinev1alpha1.Source{
+			APIVersion: "pipeline.jquad.rocks/v1alpha1", Kind: "PullRequest", Name: "iso-dedup-pr",
+		}, template("iso-dedup-pipeline"))
+
+		cc := newCountingClient(k8sClient)
+		r := newReconciler(cc)
+		reconcileN(r, "iso-dedup-trigger", 1)
+		Expect(ownedRuns("iso-dedup-trigger")).To(HaveLen(2))
+
+		By("rolling the trigger status back (as a lost/rolled-back status write would)")
+		for i := 0; i < 3; i++ {
+			pt := getTrigger("iso-dedup-trigger")
+			pt.Status = pipelinev1alpha1.PipelineTriggerStatus{}
+			Expect(k8sClient.Status().Update(ctx, pt)).To(Succeed())
+			reconcileN(r, "iso-dedup-trigger", 1)
+		}
+		Expect(cc.count(commitA)).To(Equal(1), "branch with a sanitised label re-created")
+		Expect(cc.count(commitB)).To(Equal(1))
+		Expect(ownedRuns("iso-dedup-trigger")).To(HaveLen(2))
+
+		By("the existing run is re-adopted as the branch's latest run")
+		runByCommit := map[string]string{}
+		for _, run := range ownedRuns("iso-dedup-trigger") {
+			runByCommit[run.GetLabels()[labelCommitKey]] = run.GetName()
+		}
+		pt := getTrigger("iso-dedup-trigger")
+		Expect(pt.Status.Branches.Branches["fix/dedup-trailing-"].LatestPipelineRun).To(Equal(runByCommit[commitA]))
+
+		// Invariant guard (also green before the de-dup): the pullrequest
+		// operator folds a label-set hash into Branch.Commit, so a new commit
+		// value (new push OR label change) MUST still create a new run.
+		By("a new commit value on the same branch still creates a new run")
+		src := &pullrequestv1alpha1.PullRequest{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "iso-dedup-pr", Namespace: isoNamespace}, src)).To(Succeed())
+		src.Status.SourceBranches.Branches[1].Commit = commitC
+		Expect(k8sClient.Status().Update(ctx, src)).To(Succeed())
+		reconcileN(r, "iso-dedup-trigger", 2)
+		Expect(cc.count(commitC)).To(Equal(1))
+		Expect(ownedRuns("iso-dedup-trigger")).To(HaveLen(3))
+	})
+
 	It("a GitRepository on a ref with a '/' gets one run that CalculateCurrentState recognises as already running", func() {
 		createPipeline("iso-git-pipeline")
 		repo := &sourcev1.GitRepository{
