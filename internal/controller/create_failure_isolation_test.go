@@ -109,6 +109,31 @@ var _ = Describe("PipelineRun create failures are isolated per branch", func() {
 		return out
 	}
 
+	// envtest runs no garbage collector, so owned runs survive their trigger.
+	// Other specs in this suite count EVERY PipelineRun in the cluster, so
+	// delete the runs these specs created (all owned by "iso-*" triggers).
+	AfterEach(func() {
+		isoOwned := func() []tektondevv1.PipelineRun {
+			list := &tektondevv1.PipelineRunList{}
+			Expect(k8sClient.List(ctx, list)).To(Succeed())
+			var out []tektondevv1.PipelineRun
+			for i := range list.Items {
+				for _, ref := range list.Items[i].GetOwnerReferences() {
+					if strings.HasPrefix(ref.Name, "iso-") {
+						out = append(out, list.Items[i])
+						break
+					}
+				}
+			}
+			return out
+		}
+		runs := isoOwned()
+		for i := range runs {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &runs[i]))).To(Succeed())
+		}
+		Eventually(func() int { return len(isoOwned()) }, 30*time.Second, time.Second).Should(Equal(0))
+	})
+
 	createPipeline := func(name string) {
 		task := &tektondevv1.Task{
 			ObjectMeta: v1.ObjectMeta{Name: name + "-task", Namespace: isoNamespace},
