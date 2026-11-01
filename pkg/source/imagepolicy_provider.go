@@ -148,7 +148,10 @@ func (imagepolicySubscriber ImagepolicySubscriber) GetLatestEvent(ctx context.Co
 
 func (imagepolicySubscriber ImagepolicySubscriber) CreatePipelineRunResource(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, r *runtime.Scheme) []*unstructured.Unstructured {
 	var prs []*unstructured.Unstructured
-	if len(pipelineTrigger.Status.ImagePolicy.Conditions) == 0 {
+	if retry, eligible := slotEligibleForCreate(pipelineTrigger.Status.ImagePolicy.Conditions, pipelineTrigger.GetGeneration()); eligible {
+		if retry {
+			pipelineTrigger.Status.ImagePolicy.Conditions = nil
+		}
 		paramsCorrectness, err := evaluatePipelineParamsForImage(pipelineTrigger)
 		if paramsCorrectness {
 			pr := pipelineTrigger.CreatePipelineRunResource()

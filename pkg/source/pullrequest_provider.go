@@ -266,7 +266,12 @@ func (pullrequestSubscriber PullrequestSubscriber) CreatePipelineRunResource(pip
 	for key := range pipelineTrigger.Status.Branches.Branches {
 		tempBranch := pipelineTrigger.Status.Branches.Branches[key]
 		// there is no pipeline for the current branch
-		if len(tempBranch.Conditions) == 0 {
+		if retry, eligible := slotEligibleForCreate(tempBranch.Conditions, pipelineTrigger.GetGeneration()); eligible {
+			if retry {
+				// Retrying a template-caused rejection after a spec edit: drop
+				// the stale CreateRejected condition.
+				tempBranch.Conditions = nil
+			}
 			paramsCorrectness, err := evaluatePipelineParams(pipelineTrigger, tempBranch)
 			if paramsCorrectness {
 				pr := pipelineTrigger.CreatePipelineRunResourceForBranch(tempBranch, tempBranch.GenerateBranchLabelsAsHash())

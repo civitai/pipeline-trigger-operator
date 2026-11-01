@@ -25,18 +25,43 @@ func IsPermanentCreateError(err error) bool {
 	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)
 }
 
+// CreateRejectedReason marks a slot whose PipelineRun create was rejected
+// permanently. It is distinct from the generic ReconcileErrorReason so that
+// ONLY these slots are retried after a spec edit (see slotEligibleForCreate);
+// slots carrying an old generic Error must not all re-fire.
+const CreateRejectedReason = "CreateRejected"
+
+// slotEligibleForCreate reports whether a source slot should get a new
+// PipelineRun: eligible when it has no conditions (a new revision), or
+// retry+eligible when its rejection was recorded with CreateRejectedReason at
+// an OLDER trigger generation — the rejection may have come from the template,
+// and the spec has since been edited, so try once more. A retry that is
+// rejected again is recorded at the new generation and waits for the next edit.
+func slotEligibleForCreate(conds []v1.Condition, generation int64) (retry bool, eligible bool) {
+	if len(conds) == 0 {
+		return false, true
+	}
+	for _, c := range conds {
+		if c.Type == apis.ReconcileError && c.Reason == CreateRejectedReason && c.ObservedGeneration < generation {
+			return true, true
+		}
+	}
+	return false, false
+}
+
 // createFailedCondition is the condition recorded on a source slot whose
 // PipelineRun create was permanently rejected. Its presence makes
 // CreatePipelineRunResource skip the slot until the source moves to a new
-// revision/commit (GetLatestEvent then replaces the slot condition-less).
+// revision/commit (GetLatestEvent then replaces the slot condition-less) or the
+// trigger spec is edited (generation moves past ObservedGeneration).
 func createFailedCondition(pt *pipelinev1alpha1.PipelineTrigger, err error) v1.Condition {
 	return v1.Condition{
 		Type:               apis.ReconcileError,
 		LastTransitionTime: v1.Now(),
 		ObservedGeneration: pt.GetGeneration(),
-		Reason:             apis.ReconcileErrorReason,
+		Reason:             CreateRejectedReason,
 		Status:             v1.ConditionFalse,
-		Message:            "PipelineRun create rejected permanently (not retried until a new revision): " + err.Error(),
+		Message:            "PipelineRun create rejected permanently (retried on a new revision or a PipelineTrigger spec change): " + err.Error(),
 	}
 }
 
@@ -60,6 +85,11 @@ const sourceLabelPrefix = "pipeline.jquad.rocks/"
 // A new commit value — a push, or the pullrequest-operator folding a changed
 // label-set hash into Branch.Commit — changes pr.branch.commit and so never
 // matches an older run.
+//
+// Several runs can match (e.g. duplicates from an earlier storm). The choice is
+// deterministic: runs that are not unusable (see isUnusableRun) first, then the
+// newest creationTimestamp, then the greatest name. A cancelled run is adopted
+// only if no usable one exists.
 func findExistingRun(pt *pipelinev1alpha1.PipelineTrigger, pr *unstructured.Unstructured, existing unstructured.UnstructuredList) *unstructured.Unstructured {
 	want := map[string]string{}
 	for k, v := range pr.GetLabels() {
@@ -70,6 +100,7 @@ func findExistingRun(pt *pipelinev1alpha1.PipelineTrigger, pr *unstructured.Unst
 	if len(want) == 0 {
 		return nil
 	}
+	var best *unstructured.Unstructured
 	for i := range existing.Items {
 		item := &existing.Items[i]
 		owner := v1.GetControllerOf(item)
@@ -87,11 +118,51 @@ func findExistingRun(pt *pipelinev1alpha1.PipelineTrigger, pr *unstructured.Unst
 				break
 			}
 		}
-		if match {
-			return item
+		if match && (best == nil || betterRun(item, best)) {
+			best = item
 		}
 	}
-	return nil
+	return best
+}
+
+func betterRun(a, b *unstructured.Unstructured) bool {
+	if ua, ub := isUnusableRun(a), isUnusableRun(b); ua != ub {
+		return !ua
+	}
+	ta, tb := a.GetCreationTimestamp(), b.GetCreationTimestamp()
+	if !ta.Equal(&tb) {
+		return tb.Before(&ta)
+	}
+	return a.GetName() > b.GetName()
+}
+
+// Tekton reasons for a run that was cancelled/stopped or never started (it
+// failed validation/resolution before executing anything). Such a run is not
+// a real result for the revision. Known-reason list: an unlisted reason is
+// treated as usable, which only affects the preference order, never whether
+// a run is adopted.
+var unusableRunReasons = map[string]bool{
+	"Cancelled": true, "PipelineRunCancelled": true, "CancelledRunFinally": true, "StoppedRunFinally": true,
+	"CouldntGetPipeline": true, "CouldntGetTask": true, "PipelineValidationFailed": true,
+	"PipelineInvalidGraph": true, "ParameterMissing": true, "ParameterTypeMismatch": true,
+	"InvalidWorkspaceBindings": true, "CreateRunFailed": true,
+}
+
+func isUnusableRun(u *unstructured.Unstructured) bool {
+	if st, _, _ := unstructured.NestedString(u.Object, "spec", "status"); unusableRunReasons[st] {
+		return true
+	}
+	conds, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok || m["type"] != "Succeeded" {
+			continue
+		}
+		if reason, _ := m["reason"].(string); unusableRunReasons[reason] {
+			return true
+		}
+	}
+	return false
 }
 
 // StartResult summarises one StartPipelineRuns call.

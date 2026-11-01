@@ -156,7 +156,10 @@ func (gitrepositorySubscriber GitrepositorySubscriber) GetLatestEvent(ctx contex
 
 func (gitrepositorySubscriber GitrepositorySubscriber) CreatePipelineRunResource(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, r *runtime.Scheme) []*unstructured.Unstructured {
 	var prs []*unstructured.Unstructured
-	if len(pipelineTrigger.Status.GitRepository.Conditions) == 0 {
+	if retry, eligible := slotEligibleForCreate(pipelineTrigger.Status.GitRepository.Conditions, pipelineTrigger.GetGeneration()); eligible {
+		if retry {
+			pipelineTrigger.Status.GitRepository.Conditions = nil
+		}
 		paramsCorrectness, err := evaluatePipelineParamsForGitRepository(pipelineTrigger)
 		if paramsCorrectness {
 			pr := pipelineTrigger.CreatePipelineRunResource()
