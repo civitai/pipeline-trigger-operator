@@ -43,16 +43,18 @@ type ImagePolicy struct {
 func (currentImagePolicy *ImagePolicy) GenerateImagePolicyLabelsAsHash() map[string]string {
 	labels := make(map[string]string)
 
-	labels[pipelineTriggerLabelKey+"/"+"ip.image.name"] = currentImagePolicy.ImageName
-	labels[pipelineTriggerLabelKey+"/"+"ip.image.version"] = currentImagePolicy.ImageVersion
+	// An image tag may be up to 128 chars and start with '_'; sanitise both.
+	labels[pipelineTriggerLabelKey+"/"+"ip.image.name"] = SanitizeLabelValue(currentImagePolicy.ImageName)
+	labels[pipelineTriggerLabelKey+"/"+"ip.image.version"] = SanitizeLabelValue(currentImagePolicy.ImageVersion)
 
 	return labels
 }
 
 func (currentImagePolicy *ImagePolicy) GenerateImagePolicyLabelsAsString() string {
+	labels := currentImagePolicy.GenerateImagePolicyLabelsAsHash()
 	label :=
-		pipelineTriggerLabelKey + "/" + "ip.image.name=" + currentImagePolicy.ImageName + "," +
-			pipelineTriggerLabelKey + "/" + "ip.image.version=" + currentImagePolicy.ImageVersion
+		pipelineTriggerLabelKey + "/" + "ip.image.name=" + labels[pipelineTriggerLabelKey+"/"+"ip.image.name"] + "," +
+			pipelineTriggerLabelKey + "/" + "ip.image.version=" + labels[pipelineTriggerLabelKey+"/"+"ip.image.version"]
 
 	return label
 }

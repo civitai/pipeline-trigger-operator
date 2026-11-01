@@ -123,6 +123,11 @@ func (*MockSourceSubscriber) SetCurrentPipelineRunName(ctx context.Context, clie
 	panic("unimplemented")
 }
 
+// SettleFailedRun implements v1alpha1.SourceSubscriber.
+func (*MockSourceSubscriber) SettleFailedRun(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, pipelineRun *unstructured.Unstructured, err error, permanent bool) {
+	panic("unimplemented")
+}
+
 // SetCurrentPipelineRunStatus implements v1alpha1.SourceSubscriber.
 func (*MockSourceSubscriber) SetCurrentPipelineRunStatus(pipelineRunList unstructured.UnstructuredList, obj *pipelinev1alpha1.PipelineTrigger) {
 	panic("unimplemented")

@@ -13,8 +13,23 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test
-        # internal/controller has an envtest Ginkgo suite that needs
-        # KUBEBUILDER_ASSETS (sigs.k8s.io/.../setup-envtest); it FAILS without
-        # those binaries, so it is intentionally excluded here and run locally.
-        # All fork-specific unit coverage lives in ./api/... and ./pkg/...
+        # internal/controller is an envtest Ginkgo suite needing
+        # KUBEBUILDER_ASSETS; it runs in the separate envtest job below.
         run: go test ./api/... ./pkg/...
+
+  # The controller suite drives the real Reconcile against a real API server
+  # (envtest), incl. the create-retry and create-isolation regression specs.
+  envtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22
+      - name: Controller envtest suite
+        # Same k8s version the Makefile's `make test` uses (ENVTEST_K8S_VERSION).
+        run: |
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.27.1 --bin-dir /tmp/envtest -p path)"
+          go test ./internal/controller/... -v -count=1 -timeout 20m

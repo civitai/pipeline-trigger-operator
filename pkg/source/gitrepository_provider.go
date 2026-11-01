@@ -156,7 +156,10 @@ func (gitrepositorySubscriber GitrepositorySubscriber) GetLatestEvent(ctx contex
 
 func (gitrepositorySubscriber GitrepositorySubscriber) CreatePipelineRunResource(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, r *runtime.Scheme) []*unstructured.Unstructured {
 	var prs []*unstructured.Unstructured
-	if len(pipelineTrigger.Status.GitRepository.Conditions) == 0 {
+	if retry, eligible := slotEligibleForCreate(pipelineTrigger.Status.GitRepository.Conditions, pipelineTrigger.GetGeneration()); eligible {
+		if retry {
+			pipelineTrigger.Status.GitRepository.Conditions = nil
+		}
 		paramsCorrectness, err := evaluatePipelineParamsForGitRepository(pipelineTrigger)
 		if paramsCorrectness {
 			pr := pipelineTrigger.CreatePipelineRunResource()
@@ -230,6 +233,29 @@ func evaluatePipelineParamsForGitRepository(pipelineTrigger *pipelinev1alpha1.Pi
 	}
 
 	return true, nil
+}
+
+func (gitrepositorySubscriber GitrepositorySubscriber) SettleFailedRun(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, pipelineRun *unstructured.Unstructured, err error, permanent bool) {
+	// Single-slot source: the run was built for Status.GitRepository.
+	if permanent {
+		// Keep the advanced revision so it is not retried until a new one
+		// arrives; record why. LatestPipelineRun named an older revision's run.
+		pipelineTrigger.Status.GitRepository.LatestPipelineRun = ""
+		pipelineTrigger.Status.GitRepository.Conditions = []v1.Condition{createFailedCondition(pipelineTrigger, err)}
+		return
+	}
+	// Transient (2026-07-05 behaviour): roll the slot back so the revision is
+	// still seen as new, plus an Error condition so the failure is visible
+	// (exactly what the old whole-status restore + ManageError persisted).
+	pipelineTrigger.Status.GitRepository = *statusBefore.GitRepository.DeepCopy()
+	pipelineTrigger.Status.GitRepository.AddOrReplaceCondition(v1.Condition{
+		Type:               apis.ReconcileError,
+		LastTransitionTime: v1.Now(),
+		ObservedGeneration: pipelineTrigger.GetGeneration(),
+		Reason:             apis.ReconcileErrorReason,
+		Status:             v1.ConditionFalse,
+		Message:            err.Error(),
+	})
 }
 
 func (gitrepositorySubscriber GitrepositorySubscriber) SetCurrentPipelineRunName(ctx context.Context, client client.Client, pipelineRun *unstructured.Unstructured, pipelineRunName string, pipelineTrigger *pipelinev1alpha1.PipelineTrigger) {

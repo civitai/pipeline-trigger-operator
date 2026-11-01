@@ -34,4 +34,9 @@ type SourceSubscriber interface {
 	HasIntersection(map1 map[string]string, map2 map[string]string) bool
 	GetLastConditions(pipelineTrigger *pipelinev1alpha1.PipelineTrigger) ([]string, []metav1.Condition)
 	SetCurrentPipelineRunName(ctx context.Context, client client.Client, pipelineRun *unstructured.Unstructured, pipelineRunName string, pipelineTrigger *pipelinev1alpha1.PipelineTrigger)
+	// SettleFailedRun updates ONLY the status slot the failed PipelineRun was
+	// built for: permanent -> keep the advanced revision and record an Error
+	// condition (no retry until the source changes); transient -> restore that
+	// slot from statusBefore so the same revision is retried on requeue.
+	SettleFailedRun(pipelineTrigger *pipelinev1alpha1.PipelineTrigger, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, pipelineRun *unstructured.Unstructured, err error, permanent bool)
 }

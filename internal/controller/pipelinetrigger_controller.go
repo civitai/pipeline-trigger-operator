@@ -193,6 +193,7 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.recorder.Event(&pipelineTrigger, core.EventTypeNormal, "Info", newVersionMsg)
 	}
 
+	requeueForTransientCreateError := false
 	if !running && !runninOnSecondCluster {
 
 		// Snapshot the status BEFORE we advance it to the new source revision.
@@ -202,8 +203,9 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// webhook is transiently unavailable), we must NOT persist this advanced
 		// status — otherwise the next reconcile sees "recorded revision == current
 		// revision" and never retries, permanently stranding the build until an
-		// unrelated new revision arrives. We restore this snapshot on failure so
-		// the revision is still seen as new and the create is retried.
+		// unrelated new revision arrives. On a TRANSIENT failure the failed
+		// run's slot (and only that slot) is restored from this snapshot so the
+		// revision is still seen as new and the create is retried.
 		statusBeforeAdvance := pipelineTrigger.Status.DeepCopy()
 
 		// Get the Latest Source Event
@@ -231,35 +233,24 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			log.Info("Applied ManagedCredential settings", "namespace", pipelineTrigger.Namespace, "name", pipelineTrigger.Spec.CredentialsRef.Name)
 		}
 
-		// Start the PipelineRun resources
-		var startErr error
-		for pipelineRunCnt := 0; pipelineRunCnt < len(prs); pipelineRunCnt++ {
-			instanceName, _, errRun := pipelineTrigger.StartPipelineRun(prs[pipelineRunCnt], ctx, req, r.Client)
-			if errRun != nil {
-				// Creating the Tekton PipelineRun failed (e.g. the Tekton
-				// admission webhook is down / connection refused). Record the
-				// error but do NOT mark this run as started and do NOT emit the
-				// "Started the pipeline" success event. We fall through to the
-				// retry path below so controller-runtime requeues and re-attempts
-				// once the webhook recovers.
-				startErr = errRun
-				r.recorder.Event(&pipelineTrigger, core.EventTypeWarning, "Error", errRun.Error())
-				continue
-			}
-			sourceSubscriber.SetCurrentPipelineRunName(ctx, r.Client, prs[pipelineRunCnt], instanceName, &pipelineTrigger)
-			newVersionMsg := "Started the pipeline " + instanceName + " in namespace " + pipelineTrigger.Namespace
-			r.recorder.Event(&pipelineTrigger, core.EventTypeNormal, "Info", newVersionMsg)
-		}
-
-		if startErr != nil {
-			// Roll back the in-memory status advance so the new revision is NOT
-			// persisted as processed, then surface a retryable error condition
-			// and requeue with backoff (ManageError returns Requeue: true). The
-			// next reconcile re-detects the revision as new and re-attempts the
-			// PipelineRun creation. This keeps a transient PipelineRun-create
-			// failure retryable instead of silently stranding the build.
-			pipelineTrigger.Status = *statusBeforeAdvance
-			return sourceSubscriber.ManageError(ctx, &pipelineTrigger, req, r.Client, startErr)
+		// Start the PipelineRun resources. Each create failure is settled on
+		// ITS OWN status slot (branch) only — see StartPipelineRuns:
+		//   - transient (webhook down, 5xx, timeout): that slot is rolled back
+		//     to statusBeforeAdvance so the same revision is retried on requeue
+		//     (2026-07-05 fix), while every other slot keeps its advance;
+		//   - permanent (Invalid / BadRequest, e.g. an invalid label value):
+		//     the slot keeps the new revision and gets an Error condition, and
+		//     is NOT requeued — retrying would replay the same rejection.
+		// The old code restored the WHOLE status and requeued on any failure,
+		// so one branch's permanent rejection re-created the runs of every
+		// other branch of the same PullRequest on each requeue (2026-10-31).
+		startResult := sourceApi.StartPipelineRuns(ctx, r.Client, sourceSubscriber, &pipelineTrigger, prs, pipelineRunList, statusBeforeAdvance, req,
+			func(eventtype, reason, message string) {
+				r.recorder.Event(&pipelineTrigger, eventtype, reason, message)
+			})
+		if startResult.TransientErr != nil {
+			requeueForTransientCreateError = true
+			log.Info("PipelineRun create failed transiently; requeueing", "error", startResult.TransientErr.Error())
 		}
 
 		patch.UnstructuredContent()["status"] = pipelineTrigger.Status
@@ -283,6 +274,11 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.MetricsRecorder.RecordCondition(pipelineTrigger, sourceSubscriber)
 	}
 
+	if requeueForTransientCreateError {
+		// Requeue goes through the controller's rate limiter (exponential
+		// backoff), as ManageError's Requeue did before.
+		return ctrl.Result{Requeue: true}, nil
+	}
 	return ctrl.Result{}, nil
 
 }

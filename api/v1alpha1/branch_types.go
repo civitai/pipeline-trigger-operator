@@ -23,16 +23,21 @@ type Branch struct {
 func (currentBranch *Branch) GenerateBranchLabelsAsHash() map[string]string {
 	labels := make(map[string]string)
 
-	labels[pipelineTriggerLabelKey+"/"+"pr.branch.name"] = rewriteBranchName(currentBranch.Name)
-	labels[pipelineTriggerLabelKey+"/"+"pr.branch.commit"] = currentBranch.Commit
+	// Both values come from the upstream PullRequest (i.e. from whoever named
+	// the branch) and MUST be valid label values, or the API server rejects the
+	// PipelineRun create permanently. SanitizeLabelValue is a no-op for an
+	// already-valid value, so existing runs keep matching.
+	labels[pipelineTriggerLabelKey+"/"+"pr.branch.name"] = SanitizeLabelValue(rewriteBranchName(currentBranch.Name))
+	labels[pipelineTriggerLabelKey+"/"+"pr.branch.commit"] = SanitizeLabelValue(currentBranch.Commit)
 
 	return labels
 }
 
 func (currentBranch *Branch) GenerateBranchLabelsAsString() string {
+	labels := currentBranch.GenerateBranchLabelsAsHash()
 	label :=
-		pipelineTriggerLabelKey + "/" + "pr.branch.name=" + rewriteBranchName(currentBranch.Name) + "," +
-			pipelineTriggerLabelKey + "/" + "pr.branch.commit=" + currentBranch.Commit
+		pipelineTriggerLabelKey + "/" + "pr.branch.name=" + labels[pipelineTriggerLabelKey+"/"+"pr.branch.name"] + "," +
+			pipelineTriggerLabelKey + "/" + "pr.branch.commit=" + labels[pipelineTriggerLabelKey+"/"+"pr.branch.commit"]
 
 	return label
 }
