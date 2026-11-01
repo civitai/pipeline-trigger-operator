@@ -1,0 +1,30 @@
+name: build-push
+
+# Release images are built ONLY from a pushed version tag (e.g. v0.6.1-civitai.1).
+# The image tag is the git tag, so a deploy pins an exact, immutable source
+# revision. Modelled on civitai/pullrequest-operator's build workflow, without
+# the branch/sha dev builds.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/civitai/pipeline-trigger-operator:${{ github.ref_name }}
