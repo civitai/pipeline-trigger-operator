@@ -35,8 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crtlruntimemetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	imagereflectorv1beta2 "github.com/fluxcd/image-reflector-controller/api/v1beta2"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -89,14 +87,7 @@ func main() {
 	metricsRecorder := metricsApi.NewRecorder()
 	crtlruntimemetrics.Registry.MustRegister(metricsRecorder.Collectors()...)
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                server.Options{BindAddress: metricsAddr},
-		WebhookServer:          webhook.NewServer(webhook.Options{Port: 9443}),
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "bb9e0b30.jquad.rocks",
-	})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), controllers.ManagerOptions(scheme, metricsAddr, probeAddr, enableLeaderElection))
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -107,6 +98,7 @@ func main() {
 	if enableSecondCluster {
 		if err = (&controllers.PipelineTriggerReconciler{
 			Client:                   mgr.GetClient(),
+			APIReader:                mgr.GetAPIReader(),
 			DynamicClient:            *dynamicClient,
 			Scheme:                   mgr.GetScheme(),
 			MetricsRecorder:          metricsRecorder,
@@ -120,6 +112,7 @@ func main() {
 	} else {
 		if err = (&controllers.PipelineTriggerReconciler{
 			Client:               mgr.GetClient(),
+			APIReader:            mgr.GetAPIReader(),
 			DynamicClient:        *dynamicClient,
 			Scheme:               mgr.GetScheme(),
 			MetricsRecorder:      metricsRecorder,
