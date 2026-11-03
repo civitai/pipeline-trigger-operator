@@ -189,9 +189,11 @@ type StartResult struct {
 // `existing` is the (informer-cached, possibly slightly stale) PipelineRun list.
 // When it has no match for a run, `live` (a reader that goes to the API server)
 // is asked once, label-filtered, before creating — see findLiveRun. If that
-// lookup fails the run is NOT created: the slot is settled as a transient
-// failure and retried on requeue (fail closed: an unknown view must never
-// disable the de-dup).
+// lookup fails the run is NOT created (fail closed: an unknown view must never
+// disable the de-dup), and the slot is settled like a failed create: a
+// transient error is rolled back and retried on requeue, a permanent one
+// (IsPermanentCreateError, e.g. a 400 from an invalid label selector) is
+// recorded as CreateRejected and not retried for the same revision.
 func StartPipelineRuns(ctx context.Context, c client.Client, live client.Reader, sub SourceSubscriber, pt *pipelinev1alpha1.PipelineTrigger, prs []*unstructured.Unstructured, existing unstructured.UnstructuredList, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, req ctrl.Request, event func(eventtype, reason, message string)) StartResult {
 	var res StartResult
 	for _, pr := range prs {
@@ -201,8 +203,13 @@ func StartPipelineRuns(ctx context.Context, c client.Client, live client.Reader,
 			prior, errLive = findLiveRun(ctx, live, pt, pr)
 			if errLive != nil {
 				event(core.EventTypeWarning, "Error", "Not creating PipelineRun: cannot check for an existing run: "+errLive.Error())
-				sub.SettleFailedRun(pt, statusBefore, pr, errLive, false)
-				res.TransientErr = errLive
+				permanent := IsPermanentCreateError(errLive)
+				sub.SettleFailedRun(pt, statusBefore, pr, errLive, permanent)
+				if permanent {
+					res.Permanent++
+				} else {
+					res.TransientErr = errLive
+				}
 				continue
 			}
 		}

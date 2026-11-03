@@ -8,9 +8,11 @@ import (
 	"time"
 
 	pipelinev1alpha1 "github.com/jquad-group/pipeline-trigger-operator/api/v1alpha1"
+	opstatus "github.com/jquad-group/pipeline-trigger-operator/pkg/status"
 	pullrequestv1alpha1 "github.com/jquad-group/pullrequest-operator/api/v1alpha1"
 	tektondevv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -257,5 +259,41 @@ func TestStartPipelineRuns_LiveLookupFailureDoesNotCreate(t *testing.T) {
 	}
 	if got := h.creates[commitA]; got != 1 {
 		t.Errorf("creates = %d, want 1", got)
+	}
+}
+
+// A PERMANENT live-check failure (e.g. 400 BadRequest: an invalid
+// hand-written pipeline.jquad.rocks/* template label makes the label selector
+// itself invalid) must be settled like a permanently rejected create —
+// CreateRejected on the slot, nothing created, no requeue — not rolled back
+// and retried forever as a transient one.
+func TestStartPipelineRuns_LiveLookupPermanentErrorIsNotRetried(t *testing.T) {
+	h := newCycleHarness(t, []pullrequestv1alpha1.Branch{{Name: "feature/a", Commit: commitA}}, "", nil, 0)
+	h.staleCache = true
+	lists := 0
+	h.live = interceptor.NewClient(h.c.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists++
+			return apierrors.NewBadRequest("unable to parse requirement: invalid label value")
+		},
+	})
+	r := h.cycle()
+	if r.Started != 0 || r.Permanent != 1 || r.TransientErr != nil {
+		t.Fatalf("cycle with a BadRequest lookup = %+v, want Started=0 Permanent=1 TransientErr=nil (no requeue)", r)
+	}
+	b := h.pt.Status.Branches.Branches["feature/a"]
+	if c, ok := b.GetCondition(opstatus.ReconcileError); !ok || c.Reason != CreateRejectedReason {
+		t.Errorf("slot conditions = %+v, want a %s condition with reason %s", b.Conditions, opstatus.ReconcileError, CreateRejectedReason)
+	}
+	for i := 0; i < 3; i++ {
+		if r := h.cycle(); r.Started != 0 || r.Permanent != 0 || r.TransientErr != nil {
+			t.Fatalf("later cycle %d = %+v, want nothing attempted for the same revision", i, r)
+		}
+	}
+	if lists != 1 {
+		t.Errorf("live lookups = %d, want 1 (the permanent error must not be retried)", lists)
+	}
+	if got := h.creates[commitA]; got != 0 {
+		t.Errorf("creates = %d, want 0", got)
 	}
 }
