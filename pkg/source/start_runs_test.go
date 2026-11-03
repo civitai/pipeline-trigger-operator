@@ -63,6 +63,12 @@ type cycleHarness struct {
 	scheme  *runtime.Scheme
 	pt      *pipelinev1alpha1.PipelineTrigger
 	creates map[string]int
+	// live is the reader StartPipelineRuns re-checks on a cache miss; nil
+	// means the fake API server itself (h.c).
+	live client.Reader
+	// staleCache makes the cached list empty, as an informer that has not
+	// yet observed recent creates would hand it over.
+	staleCache bool
 }
 
 // newCycleHarness builds a fake client whose PipelineRun Create counts per
@@ -147,7 +153,15 @@ func (h *cycleHarness) cycle() StartResult {
 		h.t.Fatal(err)
 	}
 	prs := sub.CreatePipelineRunResource(h.pt, h.scheme)
-	return StartPipelineRuns(ctx, h.c, sub, h.pt, prs, h.existing(), before, ctrl.Request{}, func(string, string, string) {})
+	existing := h.existing()
+	if h.staleCache {
+		existing = unstructured.UnstructuredList{}
+	}
+	live := h.live
+	if live == nil {
+		live = h.c
+	}
+	return StartPipelineRuns(ctx, h.c, live, sub, h.pt, prs, existing, before, ctrl.Request{}, func(string, string, string) {})
 }
 
 func TestStartPipelineRuns_PermanentErrorIsIsolatedAndNotRetried(t *testing.T) {

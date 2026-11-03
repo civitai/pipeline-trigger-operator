@@ -96,6 +96,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "bb9e0b30.jquad.rocks",
+		Cache:                  controllers.CacheOptions(),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -107,6 +108,7 @@ func main() {
 	if enableSecondCluster {
 		if err = (&controllers.PipelineTriggerReconciler{
 			Client:                   mgr.GetClient(),
+			APIReader:                mgr.GetAPIReader(),
 			DynamicClient:            *dynamicClient,
 			Scheme:                   mgr.GetScheme(),
 			MetricsRecorder:          metricsRecorder,
@@ -120,6 +122,7 @@ func main() {
 	} else {
 		if err = (&controllers.PipelineTriggerReconciler{
 			Client:               mgr.GetClient(),
+			APIReader:            mgr.GetAPIReader(),
 			DynamicClient:        *dynamicClient,
 			Scheme:               mgr.GetScheme(),
 			MetricsRecorder:      metricsRecorder,

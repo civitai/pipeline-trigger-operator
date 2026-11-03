@@ -73,6 +73,13 @@ type PipelineTriggerReconciler struct {
 	SecondClusterEnabled     bool
 	SecondClusterAddr        string
 	SecondClusterBearerToken string
+
+	// APIReader reads straight from the API server (mgr.GetAPIReader()). It is
+	// used only for the label-filtered "does this run already exist?" check
+	// right before a create, which the informer cache may not yet reflect.
+	// When nil, Client is used: its unstructured reads bypass the cache unless
+	// the client was built with CacheOptions.Unstructured.
+	APIReader client.Reader
 }
 
 type Param struct {
@@ -175,12 +182,15 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return sourceSubscriber.ManageError(ctx, &pipelineTrigger, req, r.Client, err)
 	}
 
-	//var pipelineRunListTest tektondevv1.PipelineRunList
-	//errList := r.List(ctx, &pipelineRunListTest, client.InNamespace(req.Namespace), client.MatchingFields{pipelineRunField: req.Name})
-
-	pipelineRunList, errList := ListTektonResources(ctx, r.DynamicClient, pipelineTrigger.Namespace, tektonGroup, tektonVersion, "pipelineruns")
+	pipelineRunList, errList := r.listPipelineRuns(ctx, pipelineTrigger.Namespace, tektonGroup, tektonVersion)
 	if errList != nil {
-		log.Error(errList, "Failed to list PipelineRuns in ", pipelineTrigger.Namespace, " with label ", pipelineTrigger.Name)
+		// Fail closed: without the run list, findExistingRun's de-dup and the
+		// "already running" check are blind, and proceeding would create runs
+		// against an empty view. Return the error (requeue with backoff)
+		// before the status is advanced or anything is created.
+		log.Error(errList, "Failed to list PipelineRuns; not creating any", "namespace", pipelineTrigger.Namespace, "trigger", pipelineTrigger.Name)
+		r.recorder.Event(&pipelineTrigger, core.EventTypeWarning, "Warning", "Failed to list PipelineRuns, not creating any: "+errList.Error())
+		return ctrl.Result{}, errList
 	}
 
 	running, runninOnSecondCluster, err := sourceSubscriber.CalculateCurrentState(r.SecondClusterEnabled, r.SecondClusterAddr, r.SecondClusterBearerToken, ctx, &pipelineTrigger, r.Client, pipelineRunList, sourceGroup, sourceVersion)
@@ -244,7 +254,7 @@ func (r *PipelineTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// The old code restored the WHOLE status and requeued on any failure,
 		// so one branch's permanent rejection re-created the runs of every
 		// other branch of the same PullRequest on each requeue (2026-10-31).
-		startResult := sourceApi.StartPipelineRuns(ctx, r.Client, sourceSubscriber, &pipelineTrigger, prs, pipelineRunList, statusBeforeAdvance, req,
+		startResult := sourceApi.StartPipelineRuns(ctx, r.Client, r.liveReader(), sourceSubscriber, &pipelineTrigger, prs, pipelineRunList, statusBeforeAdvance, req,
 			func(eventtype, reason, message string) {
 				r.recorder.Event(&pipelineTrigger, eventtype, reason, message)
 			})
@@ -416,6 +426,36 @@ func (r *PipelineTriggerReconciler) findObjectsForSource(ctx context.Context, so
 		}
 	}
 	return requests
+}
+
+// listPipelineRuns returns the PipelineRuns of a namespace. For tekton.dev (any
+// version) it lists the typed v1 PipelineRuns through r.Client, which in the
+// manager is served from the informer cache the PipelineRun watch already
+// maintains (controller-runtime routes TYPED reads to the cache; only
+// unstructured reads go to the API server by default). Each reconcile used to
+// do a full unstructured LIST of the namespace against the API server, which
+// during the 2026-10-31 backlog (1,000+ runs) OOMed the manager. The cached
+// objects are trimmed by sourceApi.TransformPipelineRunForCache; what is
+// handed on is converted from them. A version other than v1 reads the same
+// stored objects, and every field the consumers read (labels, owner
+// references, creationTimestamp, spec.status, status.conditions) has the same
+// shape in v1beta1 and v1. Any other group falls back to the live dynamic LIST.
+func (r *PipelineTriggerReconciler) listPipelineRuns(ctx context.Context, namespace string, group string, version string) (unstructured.UnstructuredList, error) {
+	if group != tektondevv1.SchemeGroupVersion.Group {
+		return ListTektonResources(ctx, r.DynamicClient, namespace, group, version, "pipelineruns")
+	}
+	typed := &tektondevv1.PipelineRunList{}
+	if err := r.Client.List(ctx, typed, client.InNamespace(namespace)); err != nil {
+		return unstructured.UnstructuredList{}, err
+	}
+	return sourceApi.PipelineRunsToUnstructured(typed)
+}
+
+func (r *PipelineTriggerReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 func ListTektonResources(ctx context.Context, client dynamic.DynamicClient, namespace string, tektonGroup string, tektonVersion string, tektonResource string) (unstructured.UnstructuredList, error) {

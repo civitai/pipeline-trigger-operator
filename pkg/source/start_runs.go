@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	"context"
-	"strings"
 
 	pipelinev1alpha1 "github.com/jquad-group/pipeline-trigger-operator/api/v1alpha1"
 	apis "github.com/jquad-group/pipeline-trigger-operator/pkg/status"
@@ -91,12 +90,7 @@ const sourceLabelPrefix = "pipeline.jquad.rocks/"
 // newest creationTimestamp, then the greatest name. A cancelled run is adopted
 // only if no usable one exists.
 func findExistingRun(pt *pipelinev1alpha1.PipelineTrigger, pr *unstructured.Unstructured, existing unstructured.UnstructuredList) *unstructured.Unstructured {
-	want := map[string]string{}
-	for k, v := range pr.GetLabels() {
-		if strings.HasPrefix(k, sourceLabelPrefix) {
-			want[k] = v
-		}
-	}
+	want := sourceLabels(pr)
 	if len(want) == 0 {
 		return nil
 	}
@@ -191,10 +185,28 @@ type StartResult struct {
 // The old behaviour rolled back the WHOLE status on any failure, so one
 // branch's permanent error replayed the creates of every other branch of the
 // same PullRequest on each requeue.
-func StartPipelineRuns(ctx context.Context, c client.Client, sub SourceSubscriber, pt *pipelinev1alpha1.PipelineTrigger, prs []*unstructured.Unstructured, existing unstructured.UnstructuredList, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, req ctrl.Request, event func(eventtype, reason, message string)) StartResult {
+//
+// `existing` is the (informer-cached, possibly slightly stale) PipelineRun list.
+// When it has no match for a run, `live` (a reader that goes to the API server)
+// is asked once, label-filtered, before creating — see findLiveRun. If that
+// lookup fails the run is NOT created: the slot is settled as a transient
+// failure and retried on requeue (fail closed: an unknown view must never
+// disable the de-dup).
+func StartPipelineRuns(ctx context.Context, c client.Client, live client.Reader, sub SourceSubscriber, pt *pipelinev1alpha1.PipelineTrigger, prs []*unstructured.Unstructured, existing unstructured.UnstructuredList, statusBefore *pipelinev1alpha1.PipelineTriggerStatus, req ctrl.Request, event func(eventtype, reason, message string)) StartResult {
 	var res StartResult
 	for _, pr := range prs {
-		if prior := findExistingRun(pt, pr, existing); prior != nil {
+		prior := findExistingRun(pt, pr, existing)
+		if prior == nil {
+			var errLive error
+			prior, errLive = findLiveRun(ctx, live, pt, pr)
+			if errLive != nil {
+				event(core.EventTypeWarning, "Error", "Not creating PipelineRun: cannot check for an existing run: "+errLive.Error())
+				sub.SettleFailedRun(pt, statusBefore, pr, errLive, false)
+				res.TransientErr = errLive
+				continue
+			}
+		}
+		if prior != nil {
 			// This trigger already created a run for exactly this source
 			// revision (same pipeline.jquad.rocks/* labels): re-adopt it
 			// instead of creating a duplicate. Without this, the branch status
