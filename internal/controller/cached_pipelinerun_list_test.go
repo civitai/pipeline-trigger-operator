@@ -263,7 +263,13 @@ var _ = Describe("PipelineRuns are listed from the informer cache", func() {
 		Expect(after - unfiltered).To(Equal(1))
 	})
 
-	It("does not create a PipelineRun when the PipelineRun list fails (F4)", func() {
+	// Scope: this covers ONLY Reconcile's own handling of a failed
+	// listPipelineRuns (return the error, create nothing). It uses an
+	// UNCACHED client (client.New), which production never does: in the
+	// manager the list is served from the informer cache. Production's cached
+	// F4 path — a failed live re-check before a create — is covered by
+	// pkg/source TestStartPipelineRuns_LiveLookupFailureDoesNotCreate.
+	It("Reconcile returns the error and creates nothing when listPipelineRuns fails (uncached client)", func() {
 		trigger := gitTrigger("cache-fail")
 
 		By("a healthy reconcile creates the run")
