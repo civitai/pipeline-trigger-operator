@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	imagereflectorv1beta2 "github.com/fluxcd/image-reflector-controller/api/v1beta2"
+	imagereflectorv1 "github.com/fluxcd/image-reflector-controller/api/v1"
 	"github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	. "github.com/onsi/ginkgo/v2"
@@ -48,7 +48,7 @@ import (
 var taskMock tektondevv1.Task
 var pipelineMock tektondevv1.Pipeline
 var gitRepository sourcev1.GitRepository
-var imagePolicy imagereflectorv1beta2.ImagePolicy
+var imagePolicy imagereflectorv1.ImagePolicy
 var pullrequest pullrequestv1alpha1.PullRequest
 var pipelineRun1 unstructured.Unstructured
 var pipelineRun2 unstructured.Unstructured
@@ -181,14 +181,14 @@ var _ = Describe("PipelineTrigger controller", func() {
 			},
 		}
 
-		imagePolicy = imagereflectorv1beta2.ImagePolicy{
+		imagePolicy = imagereflectorv1.ImagePolicy{
 			ObjectMeta: v1.ObjectMeta{
 				Name:      imagePolicyName,
 				Namespace: namespace,
 			},
-			Spec: imagereflectorv1beta2.ImagePolicySpec{
+			Spec: imagereflectorv1.ImagePolicySpec{
 				ImageRepositoryRef: meta.NamespacedObjectReference{},
-				Policy:             imagereflectorv1beta2.ImagePolicyChoice{},
+				Policy:             imagereflectorv1.ImagePolicyChoice{},
 			},
 		}
 
@@ -733,7 +733,7 @@ var _ = Describe("PipelineTrigger controller", func() {
 					},
 					Spec: pipelinev1alpha1.PipelineTriggerSpec{
 						Source: pipelinev1alpha1.Source{
-							APIVersion: "image.toolkit.fluxcd.io/v1beta2",
+							APIVersion: "image.toolkit.fluxcd.io/v1",
 							Kind:       "ImagePolicy",
 							Name:       "not-existing",
 						},
@@ -784,7 +784,7 @@ var _ = Describe("PipelineTrigger controller", func() {
 
 	Context("PipelineTrigger creates a PipelineRun on the test cluster for ImagePolicy", func() {
 		ctx := context.Background()
-		createdImagePolicy := &imagereflectorv1beta2.ImagePolicy{}
+		createdImagePolicy := &imagereflectorv1.ImagePolicy{}
 		createdPipelineRun := &tektondevv1.PipelineRun{}
 		AfterEach(func() {
 			By("Removing the created PipelineRun from the PipelineTrigger with the ImagePolicy")
@@ -798,13 +798,13 @@ var _ = Describe("PipelineTrigger controller", func() {
 
 			By("Checking if the ImagePolicy was successfully created")
 			Eventually(func() error {
-				found := &imagereflectorv1beta2.ImagePolicy{}
+				found := &imagereflectorv1.ImagePolicy{}
 				return k8sClient.Get(ctx, types.NamespacedName{Name: imagePolicyName, Namespace: namespace}, found)
 			}, time.Minute, time.Second).Should(Succeed())
 
 			By("Updating the ImagePolicy status")
-			imagePolicyStatus := imagereflectorv1beta2.ImagePolicyStatus{
-				LatestRef: &imagereflectorv1beta2.ImageRef{
+			imagePolicyStatus := imagereflectorv1.ImagePolicyStatus{
+				LatestRef: &imagereflectorv1.ImageRef{
 					Name: "ghcr.io/test/test",
 					Tag:  "v0.0.1",
 				},
@@ -862,7 +862,7 @@ var _ = Describe("PipelineTrigger controller", func() {
 					},
 					Spec: pipelinev1alpha1.PipelineTriggerSpec{
 						Source: pipelinev1alpha1.Source{
-							APIVersion: "image.toolkit.fluxcd.io/v1beta2",
+							APIVersion: "image.toolkit.fluxcd.io/v1",
 							Kind:       "ImagePolicy",
 							Name:       imagePolicyName,
 						},

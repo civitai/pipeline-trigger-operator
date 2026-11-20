@@ -21,7 +21,7 @@ import (
 	"errors"
 	"strings"
 
-	imagereflectorv1beta2 "github.com/fluxcd/image-reflector-controller/api/v1beta2"
+	imagereflectorv1 "github.com/fluxcd/image-reflector-controller/api/v1"
 
 	"github.com/go-logr/logr"
 
@@ -325,6 +325,18 @@ Therefore we must specify a custom way of watching those objects.
 This watch logic is complex, so we have split it into a separate method.
 */
 
+// imagePolicyWatchObject is the typed object the ImagePolicy watch is started
+// with. Its Go type fixes the apiVersion of the cluster-wide ImagePolicy
+// informer, and the manager waits for that informer's cache to sync before any
+// worker starts — so if the cluster stops serving this version, no
+// PipelineTrigger reconciles at all, whatever its source kind. It is
+// image.toolkit.fluxcd.io/v1: v1beta2 is deprecated and no longer served from
+// Flux 2.9. (Reading a trigger's ImagePolicy goes through the dynamic client at
+// the trigger's own spec.source.apiVersion and does not use this type.)
+func imagePolicyWatchObject() client.Object {
+	return &imagereflectorv1.ImagePolicy{}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *PipelineTriggerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.recorder = mgr.GetEventRecorderFor("PipelineTrigger")
@@ -385,7 +397,7 @@ func (r *PipelineTriggerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&pipelinev1alpha1.PipelineTrigger{},
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
-			&imagereflectorv1beta2.ImagePolicy{},
+			imagePolicyWatchObject(),
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSource),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
