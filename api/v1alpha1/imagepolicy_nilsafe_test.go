@@ -55,7 +55,7 @@ func TestImagePolicyGetters_Ready_Parses(t *testing.T) {
 // latestRef.tag must hit the position/len guards and return "" rather than panic
 // or return junk. Ported from the nilsafe coverage work (PR #11) and ADAPTED to
 // main's newer Flux API: nilsafe parsed a single .status.latestImage "repo/name:tag"
-// string; main reads .status.latestRef{name,tag} (v1beta2), where name carries the
+// string; main reads .status.latestRef{name,tag} (v1; identical in v1beta2), where name carries the
 // repo/name path and tag carries the version. The guards under test are
 // getRepositoryName's `len(parts) < 2` check and getImageVersion's missing-tag path.
 func TestImagePolicyGetters_Malformed_ReturnEmpty(t *testing.T) {
